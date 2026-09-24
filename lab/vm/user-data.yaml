@@ -1,0 +1,163 @@
+#cloud-config
+# A cloud-init configuration file for an Ubuntu 22.04. Contains sensors (auditd, Docker, Suricata, Zeek, Falco) 
+# and two begign crown jobs at every minute (a curl request to https://example.com and a gcc compile and run example file)
+# audit rules tj-exec and tj-net (on a busy node, execve+connect volume can overflow auditd's backlog buffer)
+# SSH key-only
+hostname: tracejoin-rig
+timezone: UTC
+users: [default]
+# Cloud paths: you may delete the placeholder line — the provider injects your key
+# KVM path: REPLACE THIS LINE WITH YOUR OWN PRIVATE KEY (up-local.sh enforces).
+ssh_authorized_keys:
+  - REPLACE_WITH_YOUR_PUBLIC_KEY
+ssh_pwauth: false
+disable_root: true
+
+package_update: true
+package_upgrade: false   # deliberate: kernel stays as provisioned (eBPF pinning)
+
+write_files:
+  - path: /etc/tracejoin/versions.env
+    permissions: '0644'
+    content: |
+      # TraceJoin v0 rig — pinned versions. SINGLE SOURCE OF TRUTH: edit here.
+      export DOCKER_APT_REPO="https://download.docker.com/linux/ubuntu"
+      export ZEEK_APT_REPO="https://download.opensuse.org/repositories/security:/zeek/xUbuntu_22.04"
+      export SURICATA_PPA="ppa:oisf/suricata-7.0"
+      export FALCO_APT_REPO="https://download.falco.org/packages/deb"
+      export FALCO_APT_KEY="https://falco.org/repo/falcosecurity-packages.asc"
+      export FALCO_VERSION="0.40.0"
+      export FALCOCTL_VERSION="0.14.2"
+  - path: /usr/local/sbin/provision-tracejoin.sh
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      # TraceJoin v0 instrument provisioning — idempotent, Ubuntu 22.04 (jammy), root.
+      # Installed by cloud-init; also runnable standalone for the manual fallback path.
+      set -euo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      [ -f /etc/tracejoin/versions.env ] && . /etc/tracejoin/versions.env
+      DOCKER_APT_REPO="${DOCKER_APT_REPO:-https://download.docker.com/linux/ubuntu}"
+      ZEEK_APT_REPO="${ZEEK_APT_REPO:-https://download.opensuse.org/repositories/security:/zeek/xUbuntu_22.04}"
+      SURICATA_PPA="${SURICATA_PPA:-ppa:oisf/suricata-7.0}"
+      FALCO_APT_REPO="${FALCO_APT_REPO:-https://download.falco.org/packages/deb}"
+      FALCO_APT_KEY="${FALCO_APT_KEY:-https://falco.org/repo/falcosecurity-packages.asc}"
+      FALCO_VERSION="${FALCO_VERSION:-0.40.0}"
+      FALCOCTL_VERSION="${FALCOCTL_VERSION:-0.14.2}"
+
+      log(){ printf '[tracejoin-rig] %s\n' "$*"; }
+
+      ### base packages
+      log "base packages"
+      apt-get update -y
+      apt-get install -y --no-install-recommends \
+        auditd cron jq curl ca-certificates gnupg lsb-release \
+        software-properties-common build-essential tmux
+
+      ### docker ce
+      log "docker ce"
+      install -d -m 0755 /etc/apt/keyrings
+      curl -fsSL "$DOCKER_APT_REPO/gpg" -o /etc/apt/keyrings/docker.asc
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] $DOCKER_APT_REPO $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+        > /etc/apt/sources.list.d/docker.list
+
+      ### zeek (openSUSE Build Service repo; if the URL changes, check zeek.org/download)
+      log "zeek repo"
+      curl -fsSL "$ZEEK_APT_REPO/Release.key" | gpg --dearmor -o /etc/apt/keyrings/zeek.gpg
+      echo "deb [signed-by=/etc/apt/keyrings/zeek.gpg] $ZEEK_APT_REPO/ ./" \
+        > /etc/apt/sources.list.d/zeek.list
+
+      ### suricata (OISF ppa)
+      log "suricata ppa"
+      add-apt-repository -y "$SURICATA_PPA"
+
+      apt-get update -y
+      apt-get install -y --no-install-recommends docker-ce zeek suricata
+
+      ### falco (official apt repo; pinned) + falcoctl (official release)
+      log "falco $FALCO_VERSION"
+      curl -fsSL "$FALCO_APT_KEY" | gpg --dearmor --yes -o /usr/share/keyrings/falco-archive-keyring.gpg
+      echo "deb [signed-by=/usr/share/keyrings/falco-archive-keyring.gpg] $FALCO_APT_REPO stable main" \
+        > /etc/apt/sources.list.d/falcosecurity.list
+      apt-get update -y
+      apt-get install -y "falco=${FALCO_VERSION}"
+
+      if ! command -v falcoctl >/dev/null 2>&1; then
+        tmp="$(mktemp -d)"
+        curl -fsSL -o "$tmp/falcoctl.tgz" \
+          "https://github.com/falcosecurity/falcoctl/releases/download/v${FALCOCTL_VERSION}/falcoctl_${FALCOCTL_VERSION}_linux_amd64.tar.gz"
+        tar -xzf "$tmp/falcoctl.tgz" -C "$tmp"
+        install -m 0755 "$tmp/falcoctl" /usr/local/bin/falcoctl
+        rm -rf "$tmp"
+      fi
+
+      # start services; falco/driver failures must not abort provisioning — they are reported in the manifest.
+      # NOTE: falco.service is an ALIAS managed by the driver install — 'systemctl enable falco' errors,
+      # so enable the concrete unit the driver selected instead.
+      systemctl enable docker auditd cron
+      systemctl start docker auditd cron || log "WARN: a base service failed to start"
+      timeout 180 falcoctl driver install --type modern_ebpf || log "WARN: falcoctl driver install failed — see journalctl -u falco"
+      systemctl restart falco || log "WARN: falco not running — see journalctl -u falco"
+      falco_unit="$(systemctl show -p Id --value falco 2>/dev/null || true)"
+      case "$falco_unit" in ""|falco.service) ;; *) systemctl enable "$falco_unit" || true ;; esac
+
+      ### audit rules (persisted; keys tj-exec / tj-net)
+      log "audit rules"
+      cat > /etc/audit/rules.d/90-tracejoin.rules <<'RULES'
+      # TraceJoin v0 — minimal host sensors
+      -a always,exit -S execve -k tj-exec
+      -a always,exit -S connect -k tj-net
+      RULES
+      augenrules --load
+
+      ### benign background (negative class from minute one)
+      log "benign cron"
+      cat > /etc/cron.d/tracejoin-benign <<'CRON'
+      # TraceJoin benign background (v0 negative class)
+      * * * * * root curl -s https://example.com -o /dev/null
+      * * * * * root command -v gcc >/dev/null && cd /tmp && printf 'int main(){return 0;}\n' | gcc -x c - -o /tmp/tj-benign-bin && /tmp/tj-benign-bin
+      CRON
+      chmod 0644 /etc/cron.d/tracejoin-benign
+
+      ### capture helpers
+      cat > /usr/local/sbin/tj-capture-start <<'CAP'
+      #!/usr/bin/env bash
+      # Start Zeek + Suricata on an interface (default: docker0).
+      # Zeek logs: /root/capture/zeek/ — Suricata: /var/log/suricata/eve.json
+      set -euo pipefail
+      IFACE="${1:-docker0}"
+      mkdir -p /root/capture/zeek
+      (cd /root/capture/zeek && nohup /opt/zeek/bin/zeek -i "$IFACE" af_packet > /root/capture/zeek.stdout 2>&1 &)
+      nohup suricata -i "$IFACE" > /root/capture/suricata.stdout 2>&1 &
+      echo "capture on $IFACE — zeek: /root/capture/zeek/, suricata: /var/log/suricata/eve.json"
+      CAP
+      cat > /usr/local/sbin/tj-capture-stop <<'CAP'
+      #!/usr/bin/env bash
+      pkill -f 'zeek -i' || true
+      pkill -x suricata || true
+      echo "capture stopped"
+      CAP
+      chmod 0755 /usr/local/sbin/tj-capture-start /usr/local/sbin/tj-capture-stop
+
+      ### kernel pinning (eBPF probes are kernel-sensitive)
+      apt-mark hold linux-virtual linux-image-virtual linux-headers-virtual 2>/dev/null || true
+
+      ### manifest
+      {
+        echo "provisioned: $(date -u +%FT%TZ)"
+        echo "kernel:      $(uname -r)"
+        echo "falco:       $(falco --version 2>/dev/null | head -n1) [$(systemctl is-active falco 2>/dev/null)]"
+        echo "falcoctl:    $(falcoctl --version 2>/dev/null | head -n1)"
+        echo "zeek:        $(/opt/zeek/bin/zeek --version 2>/dev/null | head -n1)"
+        echo "suricata:    $(suricata -V 2>/dev/null | head -n1)"
+        echo "docker:      $(docker --version 2>/dev/null)"
+      } > /etc/tracejoin-rig
+
+      log "done — manifest:"
+      cat /etc/tracejoin-rig
+
+runcmd:
+  - /usr/local/sbin/provision-tracejoin.sh
+
+final_message: "TraceJoin rig ready after $UPTIME seconds — verify: cat /etc/tracejoin-rig"

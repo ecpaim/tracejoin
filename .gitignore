@@ -1,0 +1,31 @@
+# build artifacts
+/bin/
+/dist/
+*.o
+*.pyc
+__pycache__/
+# eBPF
+*.bpf.o
+/vmlinux.h
+# sensor logs / local evidence (curated excerpts go to docs/)
+*.log
+/evidence/
+eve.json
+*.pcap
+*.pcapng
+# lab VMs
+*.qcow2
+.vagrant/
+/*.img
+# lab/vm launcher artifacts (downloaded cloud image + generated NoCloud seed)
+lab/vm/*.img
+# launcher-generated local user-data (contains your personal key — never commit)
+lab/vm/.user-data.local.yaml
+# raw-QEMU runtime files
+lab/vm/*.pid
+lab/vm/*.sock
+# editors
+.idea/
+.vscode/
+*.swp
+.DS_Store
