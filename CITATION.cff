@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use TraceJoin, please cite it as below."
+title: TraceJoin
+type: software
+authors:
+  - family-names: Paim
+    given-names: Eduardo Chaves
+    email: eduardo.paim@inf.ufrgs.br
+repository-code: "https://github.com/ecpaim/tracejoin"
+abstract: >-
+  Joined host-network eBPF telemetry for living-off-the-land detection on
+  Kubernetes: sensors, reproducibly-labeled traces, and baseline detections.
+keywords:
+  - ebpf
+  - kubernetes
+  - intrusion-detection
+  - lotl
+  - security
+license: MIT
+version: 0.1.0
