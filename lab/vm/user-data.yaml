@@ -48,12 +48,27 @@ write_files:
 
       log(){ printf '[tracejoin-rig] %s\n' "$*"; }
 
+      # apt with HTTP retries + a re-update/retry loop around the whole operation
+      printf 'Acquire::Retries "5";\n' > /etc/apt/apt.conf.d/99-retries
+      apt_get(){
+        local n=0
+        until "$@"; do
+          n=$((n+1))
+          [ "$n" -ge 3 ] && { log "apt failed after $n attempts: $*"; return 1; }
+          log "apt retry $n: $*"
+          apt-get update -y || true
+          sleep 5
+        done
+      }
+
       ### base packages
       log "base packages"
-      apt-get update -y
-      apt-get install -y --no-install-recommends \
-        auditd cron jq curl ca-certificates gnupg lsb-release \
+      apt_get apt-get update -y
+      # --no-upgrade: never try to upgrade packages already in the image (stale index vs pool -> 404s)
+      apt_get apt-get install -y --no-install-recommends --no-upgrade \
+        auditd cron jq ca-certificates gnupg lsb-release \
         software-properties-common build-essential tmux
+      command -v curl >/dev/null 2>&1 || apt_get apt-get install -y curl
 
       ### docker ce
       log "docker ce"
@@ -72,16 +87,16 @@ write_files:
       log "suricata ppa"
       add-apt-repository -y "$SURICATA_PPA"
 
-      apt-get update -y
-      apt-get install -y --no-install-recommends docker-ce zeek suricata
+      apt_get apt-get update -y
+      apt_get apt-get install -y --no-install-recommends docker-ce zeek suricata
 
       ### falco (official apt repo; pinned) + falcoctl (official release)
       log "falco $FALCO_VERSION"
       curl -fsSL "$FALCO_APT_KEY" | gpg --dearmor --yes -o /usr/share/keyrings/falco-archive-keyring.gpg
       echo "deb [signed-by=/usr/share/keyrings/falco-archive-keyring.gpg] $FALCO_APT_REPO stable main" \
         > /etc/apt/sources.list.d/falcosecurity.list
-      apt-get update -y
-      apt-get install -y "falco=${FALCO_VERSION}"
+      apt_get apt-get update -y
+      apt_get apt-get install -y "falco=${FALCO_VERSION}"
 
       if ! command -v falcoctl >/dev/null 2>&1; then
         tmp="$(mktemp -d)"
@@ -128,7 +143,7 @@ write_files:
       set -euo pipefail
       IFACE="${1:-docker0}"
       mkdir -p /root/capture/zeek
-      (cd /root/capture/zeek && nohup /opt/zeek/bin/zeek -i "$IFACE" af_packet > /root/capture/zeek.stdout 2>&1 &)
+      (cd /root/capture/zeek && nohup /opt/zeek/bin/zeek -i "af_packet::$IFACE" > /root/capture/zeek.stdout 2>&1 &)
       nohup suricata -i "$IFACE" > /root/capture/suricata.stdout 2>&1 &
       echo "capture on $IFACE — zeek: /root/capture/zeek/, suricata: /var/log/suricata/eve.json"
       CAP
@@ -148,7 +163,7 @@ write_files:
         echo "provisioned: $(date -u +%FT%TZ)"
         echo "kernel:      $(uname -r)"
         echo "falco:       $(falco --version 2>/dev/null | head -n1) [$(systemctl is-active falco 2>/dev/null)]"
-        echo "falcoctl:    $(falcoctl --version 2>/dev/null | head -n1)"
+        echo "falcoctl:    $(falcoctl version 2>/dev/null | head -n1)"
         echo "zeek:        $(/opt/zeek/bin/zeek --version 2>/dev/null | head -n1)"
         echo "suricata:    $(suricata -V 2>/dev/null | head -n1)"
         echo "docker:      $(docker --version 2>/dev/null)"

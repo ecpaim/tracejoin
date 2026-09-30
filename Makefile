@@ -1,7 +1,7 @@
 # TraceJoin — research repo Makefile
 # v0: manual lab rig; `lab-up` lands with the kind testbed (see README roadmap).
 
-.PHONY: lab-up scenarios smoke clean lab-vm-up lab-vm-wait lab-vm-ssh lab-vm-stop lab-vm-restart lab-vm-reset lab-vm-destroy lab-vm-clean lab-vm-snapshot lab-vm-rollback lab-vm-recreate
+.PHONY: lab-up scenarios smoke clean lab-vm-up lab-vm-wait lab-vm-status lab-vm-ssh lab-vm-stop lab-vm-restart lab-vm-reset lab-vm-destroy lab-vm-clean lab-vm-snapshot lab-vm-rollback lab-vm-recreate
 
 lab-up:
 	@echo "v0: manual rig — follow docs/threat-model-method.md (kind testbed lands in v1)."
@@ -23,6 +23,8 @@ clean:
 #   make lab-vm-restart   reboot keeping state (fast; no re-provisioning)
 #   make lab-vm-destroy   stop + remove all generated artifacts (keeps the base image)
 #   make lab-vm-clean     lab-vm-destroy + remove the base image (full wipe)
+#   make lab-vm-wait      poll until provisioning finished (does NOT start anything)
+#   make lab-vm-status    show running state, port, artifacts, manifest
 #   make lab-vm-ssh       connect
 RIG          ?= tracejoin-rig
 VM_DIR       ?= lab/vm
@@ -43,23 +45,45 @@ export SSH_PUBKEY
 lab-vm-up:
 	bash $(VM_DIR)/up-local.sh
 
-# wait until the guest has finished provisioning (the manifest file is written last);
-# fail fast if cloud-init reports the final stage failed
+# wait until the guest has finished provisioning (the manifest file is written last).
+# Aborts immediately if the rig is not running; fails fast if cloud-init reports failure.
 lab-vm-wait:
+	@if ! { [ -f $(PIDFILE) ] && kill -0 "$$(cat $(PIDFILE))" 2>/dev/null; } \
+	   && ! pgrep -f "[q]emu-system.*$(abspath $(VM_DIR))/$(RIG)-monitor.sock" >/dev/null 2>&1; then \
+	  echo "ERROR: $(RIG) is not running. Start it: make lab-vm-up   (or rebuild: make lab-vm-reset)" >&2; \
+	  exit 1; \
+	fi
 	@echo "waiting for $(RIG) provisioning (timeout $(WAIT_TIMEOUT)s; watch: tail -f $(CONSOLE))..."
 	@deadline=$$(( $$(date +%s) + $(WAIT_TIMEOUT) )); \
 	until ssh $(SSH_OPTS) -p $(SSH_PORT) ubuntu@127.0.0.1 'test -s /etc/tracejoin-rig' 2>/dev/null; do \
+	  if ! { [ -f $(PIDFILE) ] && kill -0 "$$(cat $(PIDFILE))" 2>/dev/null; } \
+	     && ! pgrep -f "[q]emu-system.*$(abspath $(VM_DIR))/$(RIG)-monitor.sock" >/dev/null 2>&1; then \
+	    echo; echo "ERROR: $(RIG) stopped while waiting. Check: tail -f $(CONSOLE)" >&2; exit 1; fi; \
 	  if ssh $(SSH_OPTS) -p $(SSH_PORT) ubuntu@127.0.0.1 'systemctl is-failed --quiet cloud-final.service' 2>/dev/null; then \
-	    echo "FAILED: provisioning did not complete (cloud-final.service failed). Check: tail -f $(CONSOLE)" >&2; exit 1; \
-	  fi; \
+	    echo; echo "FAILED: provisioning did not complete (cloud-final.service failed). Check: tail -f $(CONSOLE)" >&2; exit 1; fi; \
+	  printf '.'; \
 	  if [ $$(date +%s) -ge $$deadline ]; then \
-	    echo "TIMEOUT — provisioning not finished; check: tail -f $(CONSOLE)" >&2; exit 1; \
-	  fi; \
+	    echo; echo "TIMEOUT — provisioning not finished; check: tail -f $(CONSOLE)" >&2; exit 1; fi; \
 	  sleep 5; \
 	done
+	@echo
 	@echo "== rig ready =="
 	@ssh $(SSH_OPTS) -p $(SSH_PORT) ubuntu@127.0.0.1 'cat /etc/tracejoin-rig'
 	@echo "connect: make lab-vm-ssh   (or: ssh -p $(SSH_PORT) ubuntu@127.0.0.1)"
+
+# one-line-ish status: running?, port, artifacts, manifest
+lab-vm-status:
+	@running="no"; \
+	if [ -f $(PIDFILE) ] && kill -0 "$$(cat $(PIDFILE))" 2>/dev/null; then running="yes (pid $$(cat $(PIDFILE)))"; \
+	elif pgrep -f "[q]emu-system.*$(abspath $(VM_DIR))/$(RIG)-monitor.sock" >/dev/null 2>&1; then running="yes (orphan process)"; fi; \
+	echo "rig:      $(RIG)"; \
+	echo "running:  $$running"; \
+	if ss -ltn "sport = :$(SSH_PORT)" 2>/dev/null | grep -q LISTEN; then echo "port $(SSH_PORT): listening"; else echo "port $(SSH_PORT): free"; fi; \
+	if [ -f $(DISK) ]; then echo "overlay:  $$(stat -c%s $(DISK)) bytes"; else echo "overlay:  (none)"; fi; \
+	if [ -f $(BASE_IMG) ]; then echo "base img: present"; else echo "base img: (none)"; fi; \
+	if ssh $(SSH_OPTS) -p $(SSH_PORT) ubuntu@127.0.0.1 'test -s /etc/tracejoin-rig' 2>/dev/null; then \
+	  echo "manifest:"; ssh $(SSH_OPTS) -p $(SSH_PORT) ubuntu@127.0.0.1 'cat /etc/tracejoin-rig'; \
+	else echo "manifest: (not available)"; fi
 
 lab-vm-ssh:
 	ssh -p $(SSH_PORT) ubuntu@127.0.0.1
