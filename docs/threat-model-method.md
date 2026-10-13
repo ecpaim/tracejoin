@@ -32,9 +32,9 @@ tj-capture-start docker0 && sleep 5 && tj-capture-stop
 
 **Deferred to increment v1 (record as such, don't block):** Tetragon — Kubernetes-native; deploying it belongs to the kind-cluster step. Until then its column stays "unverified". Fast path if the rig has capacity: install `kind` on the VM, `helm install tetragon cilium/tetragon`, run the scenarios as pods.
 
-**Manual install reference (fallback only — the scripts above are canonical):** Docker CE (docker.com repo) · auditd + the two rules · Falco deb + driver · Zeek (OBS repo, `zeek -i <bridge> af_packet`) · Suricata (OISF PPA) on the same bridge. Find the bridge with `ip route | grep docker`.
+**Manual install reference (fallback only — the scripts above are canonical):** Docker CE (docker.com repo) · auditd + the two rules · Falco deb + driver · Zeek (OBS repo, `zeek -i af_packet::<bridge>`) · Suricata (OISF PPA) on the same bridge. Find the bridge with `ip route | grep docker`.
 
-**Known simplification (state it in the evidence file):** single-host capture on the Docker bridge means container→host-internal and link-local traffic may not traverse the captured interface. This v0 measures *sensor behavior*, not full visibility — the kind testbed (Part E) fixes topology later.
+**Measured topology fact (verified 2026-09-25, scenario 1):** containers carry no `169.254.0.0/16` route — IMDS/link-local traffic egresses the default route through `docker0` and **is** captured on the bridge (Zeek `conn`: `172.17.0.2:44988 → 169.254.169.254:80`). The earlier "may not traverse" assumption was wrong. Remaining simplification: container→host-internal traffic on other paths, and post-NAT egress, are not captured. This v0 measures *sensor behavior*, not full visibility — the kind testbed (Part E) fixes topology later.
 
 ---
 
@@ -86,17 +86,24 @@ date -u +%FT%TZ
 
 ---
 
-## Part C — Observation protocol
+## Part C — Observation protocol (paired windows)
 
-Run each scenario once; then fill `evidence/scenario-<n>.md` with **actual lines, not impressions**:
+Each scenario round produces a **paired observation** — an attack window **A** and a matched benign window **B** — from an identical baseline:
+
+1. Roll back to `clean-rig` (`make lab-vm-stop && make lab-vm-rollback && make lab-vm-up && make lab-vm-wait`); start `setup-listener.sh`, `setup-imds-poller.sh` (legitimate credential-agent stand-in polling IMDS every 60 s — the production noise the vendor exclusion macros exist for), and `sudo tj-capture-start docker0`.
+2. **Benign window first** — run the benign twin `tj-<n>-benign.sh` (same mechanics, legitimate payload): record `t_b0/t_b1`, then `bash collect-evidence.sh <n>-benign "$t_b0" "$t_b1" <technique>`.
+3. **Attack window** — run `tj-<n>-….sh`: record `t0/t1`, then `bash collect-evidence.sh <n> "$t0" "$t1" <technique>`.
+4. Same round, same capture session, duration-matched windows; benign precedes attack (no contamination). v0 = one replicate; verdicts are marked *preliminary* until replicated.
+
+Evaluate **three arms separately**: **auditd** (host syscall), **Falco** (host runtime policy), **Zeek+Suricata** (network). Fill `evidence/scenario-<n>.md` with **actual lines, not impressions**:
 
 | Sensor | Where to look | What to record |
 |---|---|---|
-| Falco | `journalctl -u falco --since <t0>` | Rule name (e.g., scenario 1 should trip a container-IMDS rule if present in the default ruleset), fields (`container.name`, `evt.type`, `proc.cmdline`) |
+| Falco | `journalctl -u falco-modern-bpf --since @<epoch>` (concrete unit — the `falco` alias does not resolve; journald rejects a trailing `Z`) | Rule name and fields (`container.name`, `evt.type`, `proc.cmdline`). Deployed ruleset = stable `falco-rules:3` (25 rules; the incubating container-IMDS rule is absent) — zero alerts is a legitimate cell |
 | Tetragon | *(v1 — kind cluster)* `tetra getevents` filtered `process_exec`, `process_socket_connect` | Event types + fields per scenario |
-| auditd | `ausearch -i -k tj-exec` / `-k tj-net` | SYSCALL/EXECVE/SOCKADDR records; presence of argv (curl vs none for scenario 2) |
+| auditd | `ausearch -if /var/log/audit/audit.log -i -k tj-exec` / `-k tj-net` (date and time as two args, `LC_ALL=C.UTF-8`) | SYSCALL/EXECVE/SOCKADDR records; argv presence (curl vs none for scenario 2). Note: connect records carry the destination only — **no ephemeral source port** |
 | Zeek | `conn.log`, `http.log` in the logging dir | `id.orig_h/resp_h`, `service`; for `http.log`: `uri` (scenario 2's >100-byte base64 URI), `method`, `user_agent` |
-| Suricata | `jq '.event_type' /var/log/suricata/eve.json` logs | http/flow/alert events; note honestly if **nothing fires** — an NIDS seeing nothing IS a table cell |
+| Suricata | `jq '.event_type' /var/log/suricata/eve.json` logs | http/flow/alert events; `flow` records are teardown-timestamped — filter on `.flow.start`; note honestly if **nothing fires** — an NIDS seeing nothing IS a table cell |
 
 Honesty rules: a sensor that sees nothing is recorded as "no event", not skipped. Any cell not filled by an actual run stays **unverified**.
 
@@ -104,15 +111,36 @@ Honesty rules: a sensor that sees nothing is recorded as "no event", not skipped
 
 ## Part D — Table assembly
 
-Target columns (`2026-plan.md:16` + provenance): **Technique | instantiation | host events needed | network events needed | Falco/Tetragon emitted | Zeek/Suricata emitted | Verdict | Gap assertion | Corpus evidence | Verified?**
+Target columns (`2026-plan.md:16` + provenance, updated for separability): **Technique | instantiation | host events needed | network events needed | Falco/Tetragon emitted (observability) | Zeek/Suricata emitted (observability) | separating predicate per arm (auditd / eBPF / net) | fires on benign? | Verdict | Gap assertion | Corpus evidence | Verified?** — emitted cells record observability; verdicts come only from the separability criterion below.
 
-- **Verdict** ∈ {`covered-host-only`, `covered-network-only`, `join-required`, `blind-both`} — the fourth verdict exists because it can happen (e.g., link-local IMDS may be invisible to the bridge capture); finding a `blind-both` row is a *result*, not a failure.
+- **Verdict** ∈ {`covered-host-only`, `covered-network-only`, `covered-both`, `join-required`, `blind-both`} — `covered-both` records redundant coverage (host and network arms each separate independently); `blind-both` is a *result*, not a failure.
+- **Separability criterion — verdicts are assigned by this, never by co-presence of events.** Arm *s* ∈ {auditd, Falco, Zeek+Suricata} **separates** iff a predicate over *s*'s emitted fields fires on the attack window and never on the matched benign window. Two tiers: (1) **novel literal** — a `(field, value)` pair present in attack events and absent from all benign events; (2) **novel combination** — a conjunction (≤3 literals) co-occurring in one attack event but never co-occurring in benign. If neither exists, the arm does not separate — an information-content fact about the telemetry, not a rule-writing failure. Decision matrix below.
 - **Gap assertion = one conjunction sentence**: "<process predicate> AND <network predicate>". Examples:
   - Scenario 2: *"non-interactive bash with no TTY in a web-server container opened a flow whose HTTP request carries a >100-byte base64 URI"*
   - Scenario 3: *"a pod with no prior curl executions uploaded a local file to an external endpoint"*
 - Rows citing `evidence/scenario-<n>.md`; re-run any scenario after changing a sensor's config before trusting its cell again.
 
-Expected partial outcomes (from the corpus reading; verify, don't assume): scenario 1 likely `covered-host-only` (Falco default rules include container-IMDS contact) — that's the measurement *working*; scenarios 2 and 3 are the `join-required` candidates that justify the thesis.
+Decision matrix:
+
+| auditd separates? | Falco separates? | net separates? | Verdict |
+|---|---|---|---|
+| ✓ | — | — | `covered-host-only` |
+| — | ✓ | — | `covered-host-only` (eBPF) |
+| — | — | ✓ | `covered-network-only` |
+| ✓ | | ✓ | `covered-both` |
+| — | — | — | joined predicate separates → `join-required`; none → `blind-both` |
+
+**Pre-registered predictions** (registered 2026-10-08, before any paired-window run; do not edit after runs — falsification is a result):
+
+| Scenario | Without poller (lab-minimal) | With poller (realistic benign) |
+|---|---|---|
+| S1 IMDS | auditd separates (`sockaddr=169.254.169.254`); net separates (`resp_h=169.254…`) → `covered-both`; Falco has no predicate (0 events) | auditd **cannot** separate (poller signature identical: `comm=curl`, `subj=docker-default`, same destination); net separates only via src-IP allowlist — the vendor `ec2_metadata_containers` pattern, fragile → `join-required` via container identity |
+| S1v IMDS (argv-matched variant) | n/a — variation round | auditd **cannot** separate (actor argv/comm/subj/destination identical to poller — round-1's argv separator is erased); net separates **only** via the src-tuple allowlist → the robust separator is container identity, i.e. the join |
+| S2 bash exfil | host: novel combination `comm=bash ∧ connect ∧ no execve(curl)`; net: `uri` length/entropy → `covered-both` | unchanged |
+| S3 upload | host: argv literal `--upload-file`; net: `method=PUT` → `covered-both` | unchanged |
+| Rows 7/8/10/11 | expected genuine `join-required` (both sides individually ambiguous) — v1 | — |
+
+Superseded expectation, kept for the record: the original guess that scenario 1 would be `covered-host-only` via a default Falco IMDS rule was **falsified** on 2026-09-25 — the deployed stable ruleset contains no IMDS rule, and the link-local flow *does* traverse `docker0`. Execution plan and decision log: [`CHECKPOINT.md`](../CHECKPOINT.md).
 
 ---
 

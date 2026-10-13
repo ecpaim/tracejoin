@@ -100,7 +100,7 @@ fi
 # --- meta + curated ----------------------------------------------------------------
 cat > "$OUT/meta.json" <<JSON
 {
-  "scenario": $ID,
+  "scenario": "$ID",
   "technique": "$TECHNIQUE",
   "collected_at": "$(date -u +%FT%TZ)",
   "window": { "t0": "$T0", "t1": "$T1" },

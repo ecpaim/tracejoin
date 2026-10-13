@@ -143,7 +143,7 @@ write_files:
       set -euo pipefail
       IFACE="${1:-docker0}"
       mkdir -p /root/capture/zeek
-      (cd /root/capture/zeek && nohup /opt/zeek/bin/zeek -i "af_packet::$IFACE" > /root/capture/zeek.stdout 2>&1 &)
+      (cd /root/capture/zeek && nohup /opt/zeek/bin/zeek -C -i "af_packet::$IFACE" > /root/capture/zeek.stdout 2>&1 &)
       nohup suricata -i "$IFACE" > /root/capture/suricata.stdout 2>&1 &
       echo "capture on $IFACE — zeek: /root/capture/zeek/, suricata: /var/log/suricata/eve.json"
       CAP

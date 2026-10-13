@@ -29,3 +29,4 @@ lab/vm/*.sock
 .vscode/
 *.swp
 .DS_Store
+CHECKPOINT.md

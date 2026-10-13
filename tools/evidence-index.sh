@@ -45,16 +45,22 @@ fi
     echo "|---|---|---|---|---|---|---|---|---|"
     for m in "${metas[@]}"; do
       d="$(dirname "$m")"; ev="$d/events.ndjson"
+      jq -e . "$m" >/dev/null 2>&1 || { echo "evidence-index: skipping invalid $m" >&2; continue; }
       id="$(jq -r '.scenario // "?"' "$m")"
       tech="$(jq -r '.technique // ""' "$m")"
       w0="$(jq -r '.window.t0 // ""' "$m")"
       w1="$(jq -r '.window.t1 // ""' "$m")"
       col="$(jq -r '.collected_at // ""' "$m")"
-      printf '| %s | %s | %s → %s | %s | %s | %s | %s | %s | [scenario-%s.md](../docs/evidence/scenario-%s.md) |\n' \
+      if [ -f "$ROOT/docs/evidence/scenario-$id.md" ]; then
+        curated="[scenario-$id.md](../docs/evidence/scenario-$id.md)"
+      else
+        curated="—"
+      fi
+      printf '| %s | %s | %s → %s | %s | %s | %s | %s | %s | %s |\n' \
         "$id" "$tech" "$w0" "$w1" "$col" \
         "$(count_src "$ev" auditd)" "$(count_src "$ev" falco)" \
         "$(count_src "$ev" zeek)" "$(count_src "$ev" suricata)" \
-        "$id" "$id"
+        "$curated"
     done
   fi
 } > "$OUT"
