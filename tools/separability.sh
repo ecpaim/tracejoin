@@ -58,8 +58,15 @@ net_pairs() { # dir
     awk -F'\t' 'NF>=7 {print "method=" $4; print "host=" $5; print "uri=" substr($6,1,48); print "ua=" $7}' "$d/raw/zeek-http.window.txt"
   fi
   if [ -s "$d/raw/suricata-eve-window.json" ]; then
-    jq -r '"stype=" + (.event_type // "-"),
-           "sconn=" + (.src_ip // "-") + "->" + (.dest_ip // "-") + ":" + ((.dest_port // 0)|tostring),
+    # sconn is oriented client->server:service-port. Suricata emits some records
+    # server->client (fileinfo events; flow records started by a late responder RST),
+    # which put the client's EPHEMERAL port in dest_port and made every such record a
+    # spurious novel literal. "Ephemeral ports are never literals" (header) -> when
+    # src_port is a well-known port and dest_port is not, the record is reversed.
+    jq -r '(if ((.src_port // 0) < 1024 and (.dest_port // 0) >= 1024)
+            then [.dest_ip, .src_ip, .src_port] else [.src_ip, .dest_ip, .dest_port] end) as $o |
+           "stype=" + (.event_type // "-"),
+           "sconn=" + ($o[0] // "-") + "->" + ($o[1] // "-") + ":" + (($o[2] // 0)|tostring),
            (if .http.http_method then "smethod=" + .http.http_method else empty end),
            (if .http.hostname   then "shost="   + .http.hostname   else empty end),
            (if .http.url         then "suri="    + .http.url[0:48] else empty end)' \

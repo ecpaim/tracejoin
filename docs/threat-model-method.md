@@ -214,6 +214,62 @@ S1, S1v, S-pivot, S2, S3 re-run as paired rounds under the amended protocol.
 IDS-arm predictions for these windows (identity-keyed arm) are registered in a
 separate commit before the IDS analysis is run.
 
+### Results — replicate 2 (session 2026-10-16 19:40–19:58 UTC; recorded after the run)
+
+Fresh rollback; probe live for the whole session (2052 lines, 0 non-JSON); pairs run
+back-to-back with `tj-pair.sh` in the order 1v, 1, p, 2, 3. Scored with
+`tools/separability.sh` (orientation fix below applied to both replicates) and
+`tools/s0-check.sh`.
+
+**Defects found while scoring (instrumentation, not measurements):**
+
+1. **Late SLIRP RST.** Every unanswered SYN to 169.254.169.254 receives an RST from
+   QEMU's user-mode network ~84 s later; Zeek logs it as a *new* conn record of the
+   same tuple (`conn_state=RSTRH`, `history=^r`, `orig_pkts=0`), Suricata as a
+   reversed `flow` record. 131 such records in the session; every one belongs to a
+   tuple the probe attributes to an earlier connect.
+2. **Cross-pair leakage** (back-to-back pairs; B's net window reaches 60 s into the
+   past): `1-benign` contains the S1v attack's late RST (`172.17.0.2:42168 → IMDS`,
+   attributed by the probe to the S1v attack: pid 2687, `curl`, tj-victim,
+   19:50:09); `p-benign` contains the S1 attack's late RST; `3-benign` contains the
+   S2 attack flow itself (`/in.php?base64=…`). `1v-benign` and `2-benign` are clean.
+3. **Extractor orientation.** Suricata `fileinfo` events and RST-started `flow`
+   records are server→client, so `sconn` carried the client's ephemeral port and
+   every such record was a novel literal — contradicting the stated rule "ephemeral
+   ports are never literals". Fixed by orienting `sconn` client→server when
+   `src_port < 1024 ≤ dest_port`; replicate-1 verdicts unchanged (only the
+   `sconn=…:<ephemeral>` literals disappear).
+
+**Replay outcome vs prediction:**
+
+| Round | Outcome | vs prediction |
+|---|---|---|
+| S1v | auditd does not separate; Falco 0; net only `conn=172.17.0.2->169.254.169.254:80` | **replicates** |
+| S1 | auditd argv; Falco 0; net only via Suricata `sconn=172.17.0.2->169.254.169.254:80` — Zeek's `conn` literal is erased because B contains the leaked S1v late RST | auditd/Falco replicate; **net cell invalid** (contaminated B) → re-run |
+| S-pivot | auditd destination literals; Falco 0; net `conn=172.17.0.2->172.17.0.4:80` (+ one leaked S1 late-RST literal) | **replicates** (B contaminated; separator unaffected) → re-run for a clean B |
+| S2 | auditd as r1; **Falco separates** (2 × *Redirect stdout/stdin to network connection*, `dup2`, `container_name=tj-victim`, `connection=172.17.0.2:56146->172.17.0.3:80`); net `uri=/in.php?base64=…` | **confirmed** (Falco prediction; disclosed as informed by the diagnostic) |
+| S3 | auditd `--upload-file`; **Falco 0 with the padded window** (resolves the unverified r1 cell); net `PUT /upload` | **replicates** (B contaminated by the S2 flow; separators unaffected) → re-run for a clean B |
+| all | no `stype=flow` / poller-`sconn` soak artifacts | **confirmed** (symmetric soak works) |
+
+**S0 outcome (criteria as registered):**
+
+| # | Result |
+|---|---|
+| K1 | **FAIL as registered** in all 10 windows. Every Zeek-only tuple (10–13 per window) is a late-RST record (`history=^r`, `orig_pkts=0`: no connect occurred in the interval); every probe-only tuple (exactly 1 per window) is the poller's last connect 2–6 s before collection, not yet logged by Zeek (the interval's effective right edge is the collect time, not `net_end − 5 s`). Session-level decomposition: 147 Zeek SYN-bearing records ↔ 155 probe connects; **every SYN-bearing record has its probe connect, every probe connect older than the last snapshot has its Zeek record, 0 duplicates**; the 8 surplus probe connects post-date Zeek's last snapshot |
+| K2 | **PASS** — 10/10 windows, every container-originated connect's `cg` resolves to the `identity.ndjson` container of its source IP |
+| K3 | **PASS** — S1v attack tuple `172.17.0.2:42168 → 169.254.169.254:80`: `comm=curl`, `cg` = tj-victim; poller IMDS tuples carry tj-imds-poller's `cg` |
+
+Reading: K1 failed on a specification error — the reference sensor (Zeek) emits
+conn records that correspond to no connect, and the comparison interval ignored
+collect-time truncation — not on a probe defect: the failure mode K1 exists to detect
+(missed or spurious connects) occurred 0 times. Under the registered rule no
+threshold is adjusted after seeing data, so **S0 is not declared GO on this
+session**; an amended K1′ is registered below and evaluated prospectively on the
+next session. Side result for F2: in this very session the probe resolved a flow
+that flow-log keying misattributes — Zeek shows `tj-victim → IMDS` inside a benign
+window (late RST), the probe shows no such connect there. An IP-keyed learner
+training on that window would learn `tj-victim → IMDS` as benign.
+
 Superseded expectation, kept for the record: the original guess that scenario 1 would be `covered-host-only` via a default Falco IMDS rule was **falsified** on 2026-09-25 — the deployed stable ruleset contains no IMDS rule, and the link-local flow *does* traverse `docker0`. Execution plan and decision log: [`CHECKPOINT.md`](../CHECKPOINT.md).
 
 ---
