@@ -96,9 +96,11 @@ pre-registered predictions: `docs/threat-model-method.md` Parts C–D; full prot
 record: [`CHECKPOINT.md`](../CHECKPOINT.md).
 
 ```
-rollback to clean-rig → setup-listener.sh + setup-imds-poller.sh + tj-capture-start docker0
-# terminal 2 (probe, whole session; amendment 2026-10-16):
+rollback to clean-rig → setup-listener.sh + setup-imds-poller.sh
+# terminal 2 (probe, whole session) — start it BEFORE the capture (amendment 2026-10-16c):
 #   mkdir -p ~/probe && sudo bpftrace -q -B line ~/scenarios/tj-probe.bt > ~/probe/tj-probe.ndjson
+sudo tj-capture-start docker0
+# preferred: bash tj-pair.sh <id> <benign> <attack> <technique>  (soak + 180 s inter-pair quiet period)
 t_b0=$(date -u +%FT%TZ); bash tj-<n>-benign.sh; t_b1=$(date -u +%FT%TZ); sleep 25
 bash collect-evidence.sh <n>-benign "$t_b0" "$t_b1" <technique>
 t0=$(date -u +%FT%TZ); bash tj-<n>-<technique>.sh; t1=$(date -u +%FT%TZ); sleep 25

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # tj-pair.sh — run ONE paired round (benign window, then attack window) under the
 # 2026-10-16 protocol: symmetric 25 s soak before both collects, probe must be live.
-# Run INSIDE THE GUEST from ~/scenarios, after setup-listener/poller + tj-capture-start.
+# Run INSIDE THE GUEST from ~/scenarios. Session order (amendment 2026-10-16c):
+#   1. setup-listener.sh + setup-imds-poller.sh
+#   2. start the probe (terminal 2)   <- BEFORE the capture, so every flow Zeek
+#   3. sudo tj-capture-start docker0     sees has a probe connect (S0 K1')
+#   4. tj-pair.sh ... ; 5. tj-capture-stop; 6. Ctrl-C the probe
 #
 # Usage: bash tj-pair.sh <id> <benign-script> <attack-script> <technique>
 #   e.g. bash tj-pair.sh 1v tj-1-benign.sh tj-1v-imds-stealth.sh T1552.005

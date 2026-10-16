@@ -303,6 +303,33 @@ contaminated B windows), in that order, with the quiet period.
 | clean B | no benign window contains a tuple whose probe `connect` lies in another pair's attack window |
 | S0 | K1′, K2, K3 all PASS → **GO** |
 
+### Results — replicate-2 completion session (2026-10-16 20:12–20:21 UTC; recorded after the run)
+
+Fresh rollback; pairs 1, p, 3 with the 180 s quiet period; probe 1153 lines, 0
+non-JSON. Evidence: `evidence/r2b/`.
+
+| Prediction | Outcome |
+|---|---|
+| S1 | auditd argv only ✓; Falco 0 ✓; net: `conn=172.17.0.2->169.254.169.254:80` is the sole A-only literal — **the predicted `sconn` literal is absent** (partially falsified). Cause: Suricata wrote the attack's flow record at 20:15:13, after the 20:14:36 collect — the known constraint "Suricata records for unanswered flows lag beyond practical soak" (CHECKPOINT §2.5), which the prediction overlooked. The r2a `sconn` literal was therefore the leaked late-RST record, not the attack's own. Verdict `covered-both` unchanged |
+| S-pivot | auditd destination literals ✓; Falco 0 ✓; net `conn=172.17.0.2->172.17.0.4:80` only — **predicted `sconn` absent** (same cause: no Suricata record of the flow by collect time). Verdict unchanged |
+| S3 | ✓ exactly (auditd `--upload-file`; Falco 0; net `PUT` / `/upload`) |
+| clean B | ✓ — each benign window's only victim-originated tuple is its own twin's (probe: `curl`, same second) |
+| K2 | ✓ PASS, 6/6 windows |
+| K3 | ✓ PASS — S1 attack tuple `172.17.0.2:54618 → 169.254.169.254:80`: `comm=curl`, `cg` = tj-victim (`1227844fe96e`); all 78 poller connects carry tj-imds-poller's `cg` |
+| K1′ | **FAIL as registered**: (a) 7 SYN-bearing Zeek records without a probe connect; (b) 0; dups 0; 7 responder-only orphans (their late RSTs). All 7 lie in 20:12:23–20:13:04, i.e. after `tj-capture-start` and **before the probe's first event (20:13:06)**: the operator instructions started the capture in terminal 1 before the probe in terminal 2. K1′(b) was bounded by capture start; (a) was not bounded by probe start — a specification asymmetry. Within the interval where both sensors ran: 78 / 78, 0 unmatched, 0 duplicates |
+
+**S0 status:** not declared GO (no post-hoc criterion change). K2/K3 have passed in
+16/16 windows over two sessions; the probe has produced 0 missed and 0 spurious
+connects in both sessions within the interval it was running. **Correction is
+procedural, not a criterion change:** from the next session the probe is started
+**before** `tj-capture-start`, so K1′ applies verbatim; it is evaluated on the next
+session (the first IDS session), which is the S0 decision point.
+
+**Replicate-2 consolidated** (S1, S-pivot, S3 from this session; S1v, S2 from
+session a, whose B windows were clean): every round-1 verdict and separator class
+replicates (n = 2); S2's Falco cell is `sep` (stock *Redirect stdout/stdin*), S3's
+Falco cell is a verified 0.
+
 Superseded expectation, kept for the record: the original guess that scenario 1 would be `covered-host-only` via a default Falco IMDS rule was **falsified** on 2026-09-25 — the deployed stable ruleset contains no IMDS rule, and the link-local flow *does* traverse `docker0`. Execution plan and decision log: [`CHECKPOINT.md`](../CHECKPOINT.md).
 
 ---
