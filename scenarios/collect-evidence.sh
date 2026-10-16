@@ -25,9 +25,17 @@ TECHNIQUE="${4:-<fill in>}"
 # makes ausearch fail with "Hour, Minute, and Second are required").
 AUDIT_LC="C.UTF-8"
 AUDIT_LOG="/var/log/audit/audit.log"   # -if: ausearch reads stdin (empty) without it
-A0D=$(date -d "$T0" '+%m/%d/%y'); A0T=$(date -d "$T0" '+%H:%M:%S')
-A1D=$(date -d "$T1" '+%m/%d/%y'); A1T=$(date -d "$T1" '+%H:%M:%S')
 T0E=$(date -d "$T0" +%s); T1E=$(date -d "$T1" +%s)   # epochs: journald + Zeek ts
+
+# Host windows are padded by HOST_PAD seconds on BOTH sides (protocol amendment
+# 2026-10-16). Window markers have 1 s resolution, and journalctl --until @<epoch>
+# stops at .000 of that second: a sub-second scenario (t0 == t1) produced an EMPTY
+# Falco query and a false zero (S2, 2026-10-08). Padding applies to A and B alike
+# and can only add events to a window, never remove the scenario's own.
+HOST_PAD="${HOST_PAD:-1}"
+H0E=$((T0E - HOST_PAD)); H1E=$((T1E + HOST_PAD))
+A0D=$(date -d "@$H0E" '+%m/%d/%y'); A0T=$(date -d "@$H0E" '+%H:%M:%S')
+A1D=$(date -d "@$H1E" '+%m/%d/%y'); A1T=$(date -d "@$H1E" '+%H:%M:%S')
 
 # Network sensors timestamp a flow at teardown/timeout, not on its first packet, so
 # a tight command window misses the flow that matters. Widen the network query
@@ -52,7 +60,7 @@ sudo LC_ALL="$AUDIT_LC" ausearch -if "$AUDIT_LOG" -i -k tj-net  -ts "$A0D" "$A0T
 # 'Z', so query by epoch instead of the ISO string.
 FALCO_UNIT="$(systemctl show -p Id --value falco 2>/dev/null || true)"
 FALCO_UNIT="${FALCO_UNIT:-falco-modern-bpf.service}"
-sudo journalctl -u "$FALCO_UNIT" --since "@$T0E" --until "@$T1E" -o json --no-pager > "$RAW/falco.json" 2>&1 || true
+sudo journalctl -u "$FALCO_UNIT" --since "@$H0E" --until "@$H1E" -o json --no-pager > "$RAW/falco.json" 2>&1 || true
 jq -r 'select(.MESSAGE) | .MESSAGE' "$RAW/falco.json" > "$RAW/falco.txt" 2>/dev/null || : > "$RAW/falco.txt"
 
 # Zeek logs live root-owned under /root/capture — read as root, write as ubuntu
@@ -81,6 +89,38 @@ if sudo test -f /var/log/suricata/eve.json; then
     "$RAW/suricata-eve-all.json" > "$RAW/suricata-eve-window.json" 2>/dev/null || : > "$RAW/suricata-eve-window.json"
 fi
 
+# eBPF join-key probe (tools/ebpf/tj-probe.bt), if running. Windowed with the NET
+# window (not the host window): the probe is the identity source for the flows the
+# net arm sees, and the S0 check compares it 1:1 against Zeek conn over the same
+# interval. Non-JSON lines (bpftrace notices, "Lost N events") are dropped and
+# counted. PROBE=absent in meta.json means the probe was not running -- that is
+# not a "0 events" cell.
+PROBE_LOG="${PROBE_LOG:-$HOME/probe/tj-probe.ndjson}"
+PROBE_STATE="absent"; PROBE_BAD=0
+if [ -s "$PROBE_LOG" ]; then
+  PROBE_STATE="present"
+  jq -Rc --argjson a "$N0E" --argjson b "$N1E" \
+    'fromjson? | select(.ts >= $a and .ts <= $b)' "$PROBE_LOG" > "$RAW/probe.window.ndjson" 2>/dev/null \
+    || : > "$RAW/probe.window.ndjson"
+  PROBE_BAD=$( { jq -Rr 'fromjson? // "BAD" | if . == "BAD" then . else empty end' "$PROBE_LOG" 2>/dev/null || true; } | wc -l)
+fi
+
+# Identity snapshot at collection time: container name/id/image/IP/netns mode.
+# Source for the "live IP map" IDS arm (the Hubble-equivalent competitor) and for
+# resolving the probe's cgroup leaf (docker-<id>.scope) to a container name.
+ids=$(docker ps -aq 2>/dev/null || true)
+if [ -n "$ids" ]; then
+  # shellcheck disable=SC2086
+  docker inspect $ids 2>/dev/null | jq -c '.[] | {
+      name: (.Name | ltrimstr("/")), id: .Id, image: .Config.Image,
+      ips: [.NetworkSettings.Networks // {} | to_entries[] | .value.IPAddress | select(. != "")],
+      netmode: .HostConfig.NetworkMode, running: .State.Running,
+      started: .State.StartedAt, pid: .State.Pid }' > "$RAW/identity.ndjson" 2>/dev/null \
+    || : > "$RAW/identity.ndjson"
+else
+  : > "$RAW/identity.ndjson"
+fi
+
 # --- normalized aggregate ---------------------------------------------------------
 : > "$OUT/events.ndjson"
 add_lines() { # file source kind
@@ -96,6 +136,10 @@ if [ -s "$RAW/suricata-eve-window.json" ]; then
   jq -c '{source:"suricata", kind:(.event_type // "event"), ts:.timestamp, raw:(.|tostring)}' \
     "$RAW/suricata-eve-window.json" >> "$OUT/events.ndjson"
 fi
+if [ -s "$RAW/probe.window.ndjson" ]; then
+  jq -c '{source:"probe", kind:.ev, ts:.ts, raw:(.|tostring)}' \
+    "$RAW/probe.window.ndjson" >> "$OUT/events.ndjson"
+fi
 
 # --- meta + curated ----------------------------------------------------------------
 cat > "$OUT/meta.json" <<JSON
@@ -104,7 +148,9 @@ cat > "$OUT/meta.json" <<JSON
   "technique": "$TECHNIQUE",
   "collected_at": "$(date -u +%FT%TZ)",
   "window": { "t0": "$T0", "t1": "$T1" },
+  "host_window": { "start_epoch": $H0E, "end_epoch": $H1E, "pad_s": $HOST_PAD },
   "net_window": { "start": "$NW0", "end": "$NW1" },
+  "probe": { "state": "$PROBE_STATE", "log": "$PROBE_LOG", "non_json_lines": $PROBE_BAD },
   "host": "$(hostname)",
   "kernel": "$(uname -r)",
   "rig_manifest": "$(tr '\n' '|' </etc/tracejoin-rig 2>/dev/null | sed 's/"/\\"/g')"
@@ -115,7 +161,7 @@ n(){ [ -s "$1" ] && wc -l < "$1" || echo 0; }
 {
   echo "# Evidence — scenario $ID ($TECHNIQUE)"
   echo
-  echo "- window (UTC): \`$T0\` → \`$T1\`"
+  echo "- window (UTC): \`$T0\` → \`$T1\` (host sensors padded ±${HOST_PAD} s)"
   echo "- net window (UTC): \`$NW0\` → \`$NW1\` (flows are end-timestamped)"
   echo "- host: $(hostname), kernel $(uname -r)"
   echo "- raw: \`evidence/scenario-$ID/raw/\`, aggregate: \`events.ndjson\`"
@@ -130,6 +176,8 @@ n(){ [ -s "$1" ] && wc -l < "$1" || echo 0; }
   echo "| zeek http (window) | zeek-http.window.txt | $(n "$RAW/zeek-http.window.txt") |"
   echo "| zeek conn (window) | zeek-conn.window.txt | $(n "$RAW/zeek-conn.window.txt") |"
   echo "| suricata (window) | suricata-eve-window.json | $(n "$RAW/suricata-eve-window.json") |"
+  echo "| probe (window; $PROBE_STATE) | probe.window.ndjson | $(n "$RAW/probe.window.ndjson") |"
+  echo "| identity snapshot | identity.ndjson | $(n "$RAW/identity.ndjson") |"
   echo
   echo "## Falco (host-only baseline)"
   echo '```'; head -n 15 "$RAW/falco.txt" 2>/dev/null || echo "(none)"; echo '```'

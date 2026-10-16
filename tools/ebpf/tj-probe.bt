@@ -1,0 +1,76 @@
+#!/usr/bin/env bpftrace
+/*
+ * tj-probe.bt — TraceJoin S0 probe: the (owner, tuple) join key, recorded per event.
+ *
+ * Emits one JSON line per
+ *   connect : tcp_v4_connect returning 0 / -EINPROGRESS (a SYN was sent)
+ *   accept  : inet_csk_accept returning a socket (server side of a flow)
+ *   exec    : execve entry (comm = the image calling exec, file = the new binary)
+ * each carrying the owner identity: pid, ppid, comm, cgroup id, and the cgroup-v2
+ * leaf name read IN-KERNEL at event time (docker-<64hex>.scope under the rig's
+ * systemd cgroup driver; truncated to BPFTRACE_STRLEN=64 -> "docker-" + 57 hex,
+ * still unique). In-kernel identity survives container exit (no userspace lookup).
+ *
+ * Flow orientation is the same for connect and accept (saddr/sport = originator,
+ * daddr/dport = responder), so a container->container flow appears twice with the
+ * identical 4-tuple: once with the client's identity, once with the server's.
+ *
+ * Written for the GUEST's bpftrace 0.14 (Ubuntu 22.04): no BEGIN/END (flaky on
+ * Jammy's build, and BEGIN output would pollute the NDJSON), no cgroup_path()
+ * or bswap() (absent in 0.14), 1-arg ntop(), epoch time via strftime("%s.%f").
+ * ts caveat: strftime converts the monotonic clock with a boot-time offset;
+ * exact on a VM without suspend. The 4-tuple, not ts, is the join key.
+ *
+ * Run INSIDE THE GUEST, in its own terminal, before the round starts:
+ *   mkdir -p ~/probe
+ *   sudo bpftrace -q -B line ~/scenarios/tj-probe.bt > ~/probe/tj-probe.ndjson
+ * (redirect is done by the user shell -> file owned by ubuntu; -B line so the
+ * collector never reads a half-written buffer). Ctrl-C after the last collect.
+ * scenarios/collect-evidence.sh windows ~/probe/tj-probe.ndjson into raw/.
+ *
+ * Kill criteria (pre-registered, docs/threat-model-method.md Part D, "S0").
+ * Scope limits: IPv4 TCP only (no tcp_v6_connect, no UDP/DNS).
+ */
+
+kprobe:tcp_v4_connect
+{
+    @csk[tid] = arg0;
+}
+
+kretprobe:tcp_v4_connect
+/@csk[tid]/
+{
+    $sk = (struct sock *)@csk[tid];
+    delete(@csk[tid]);
+    $ret = (int32)retval;
+    if ($ret == 0 || $ret == -115) {
+        $dp = $sk->__sk_common.skc_dport;
+        printf("{\"ts\":%s,\"ev\":\"connect\",\"pid\":%d,\"ppid\":%d,\"comm\":\"%s\",\"cgid\":%llu,\"cg\":\"%s\",\"saddr\":\"%s\",\"sport\":%d,\"daddr\":\"%s\",\"dport\":%d,\"ret\":%d}\n",
+            strftime("%s.%f", nsecs), pid, curtask->real_parent->tgid, comm, cgroup,
+            str(curtask->cgroups->dfl_cgrp->kn->name),
+            ntop($sk->__sk_common.skc_rcv_saddr), $sk->__sk_common.skc_num,
+            ntop($sk->__sk_common.skc_daddr), (($dp & 0xff) << 8) | (($dp >> 8) & 0xff),
+            $ret);
+    }
+}
+
+kretprobe:inet_csk_accept
+/retval != 0/
+{
+    $sk = (struct sock *)retval;
+    $dp = $sk->__sk_common.skc_dport;
+    printf("{\"ts\":%s,\"ev\":\"accept\",\"pid\":%d,\"ppid\":%d,\"comm\":\"%s\",\"cgid\":%llu,\"cg\":\"%s\",\"saddr\":\"%s\",\"sport\":%d,\"daddr\":\"%s\",\"dport\":%d,\"fam\":%d}\n",
+        strftime("%s.%f", nsecs), pid, curtask->real_parent->tgid, comm, cgroup,
+        str(curtask->cgroups->dfl_cgrp->kn->name),
+        ntop($sk->__sk_common.skc_daddr), (($dp & 0xff) << 8) | (($dp >> 8) & 0xff),
+        ntop($sk->__sk_common.skc_rcv_saddr), $sk->__sk_common.skc_num,
+        $sk->__sk_common.skc_family);
+}
+
+tracepoint:syscalls:sys_enter_execve
+{
+    printf("{\"ts\":%s,\"ev\":\"exec\",\"pid\":%d,\"ppid\":%d,\"comm\":\"%s\",\"cgid\":%llu,\"cg\":\"%s\",\"file\":\"%s\"}\n",
+        strftime("%s.%f", nsecs), pid, curtask->real_parent->tgid, comm, cgroup,
+        str(curtask->cgroups->dfl_cgrp->kn->name),
+        str(args->filename));
+}

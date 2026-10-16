@@ -61,9 +61,11 @@ container↔guest flows, but no process identity. Two NAT layers exist — Docke
 visible to the sensors only on its first hop (`docker0`).
 
 Measured deployment state: Falco's stable ruleset (`falco-rules:3`, 25 rules) contains
-no IMDS rule — **zero alerts across all eight windows** (four attacks + four matched
-benign); the zero column in `docs/threat-model.md` is a ruleset property, not a sensor
-failure.
+no IMDS rule and is silent on S1, S1v and S-pivot. **Erratum (2026-10-16):** the S2
+"zero" was a collector artifact (sub-second window, empty `journalctl` query); an
+unpaired diagnostic re-run fired the stock *Redirect stdout/stdin to network
+connection* rule (`dup2`) twice. S2/S3 Falco cells await the paired replay — see
+`docs/threat-model-method.md` Part D.
 
 
 ## Scenario files
@@ -95,15 +97,25 @@ record: [`CHECKPOINT.md`](../CHECKPOINT.md).
 
 ```
 rollback to clean-rig → setup-listener.sh + setup-imds-poller.sh + tj-capture-start docker0
-t_b0=$(date -u +%FT%TZ); bash tj-<n>-benign.sh; t_b1=$(date -u +%FT%TZ)
+# terminal 2 (probe, whole session; amendment 2026-10-16):
+#   mkdir -p ~/probe && sudo bpftrace -q -B line ~/scenarios/tj-probe.bt > ~/probe/tj-probe.ndjson
+t_b0=$(date -u +%FT%TZ); bash tj-<n>-benign.sh; t_b1=$(date -u +%FT%TZ); sleep 25
 bash collect-evidence.sh <n>-benign "$t_b0" "$t_b1" <technique>
 t0=$(date -u +%FT%TZ); bash tj-<n>-<technique>.sh; t1=$(date -u +%FT%TZ); sleep 25
 bash collect-evidence.sh <n> "$t0" "$t1" <technique>
-sudo tj-capture-stop
+sudo tj-capture-stop      # then Ctrl-C the probe in terminal 2
 ```
 
-Per-round analysis (host): `tools/separability.sh evidence/scenario-<n>
-evidence/scenario-<n>-benign` — per arm (auditd / Falco / Zeek+Suricata); the report
+Soak is symmetric (25 s before **both** collects); host-sensor queries are padded
+±1 s (`HOST_PAD`) because a sub-second scenario has `t0 == t1` and an unpadded
+`journalctl --until` covers nothing (S2 Falco erratum, method doc Part D).
+Stage per round (rollback reverts them): `scp -P 2222 scenarios/*.sh
+tools/ebpf/tj-probe.bt ubuntu@127.0.0.1:~/scenarios/`, `sudo usermod -aG docker
+ubuntu`, `sudo apt install -y bpftrace` (guest, 0.14).
+
+Per-round analysis (host): `tools/separability.sh [--ids] evidence/scenario-<n>
+evidence/scenario-<n>-benign` (`--ids` adds the `ids-ip` arm from `tools/baseline.sh`;
+IP-keyed, so not a join measurement) — per arm (auditd / Falco / Zeek+Suricata); the report
 is persisted to `evidence/scenario-<n>/separability.md` (the A−B residue; the raw
 superset — benign background, apparatus, padding — remains in `raw/` and
 `curated.md`). Verdicts land in `docs/threat-model.md`.

@@ -1,0 +1,7 @@
+{
+  "172.17.0.2": { "name": "tj-victim",      "image": "nginx:latest" },
+  "172.17.0.3": { "name": "tj-listener",    "image": "python:3-slim" },
+  "172.17.0.4": { "name": "tj-imds-poller", "image": "nginx:latest" },
+  "169.254.169.254": { "name": "IMDS",      "image": "external" },
+  "_comment": "Offline identity join for the fixed 3-container rig (exact because rig addresses are deterministic). Replaced by cgroup resolution when the recorder (Phase 4) lands. NOTE: tj-victim and tj-imds-poller share the nginx image by design (binary parity — identity is the only distinguishing field)."
+}

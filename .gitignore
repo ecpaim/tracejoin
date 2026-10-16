@@ -30,3 +30,4 @@ lab/vm/*.sock
 *.swp
 .DS_Store
 CHECKPOINT.md
+CLAUDE.md

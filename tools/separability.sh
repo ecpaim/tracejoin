@@ -19,8 +19,10 @@
 # - tier-2 (novel combination) beyond these composites remains a manual step.
 set -euo pipefail
 
-A="${1:?usage: separability.sh <attack-dir> <benign-dir>}"
-B="${2:?usage: separability.sh <attack-dir> <benign-dir>}"
+IDS=0
+if [ "${1:-}" = "--ids" ]; then IDS=1; shift; fi
+A="${1:?usage: separability.sh [--ids] <attack-dir> <benign-dir>}"
+B="${2:?usage: separability.sh [--ids] <attack-dir> <benign-dir>}"
 REPORT=""
 
 # every report line goes to stdout AND accumulates for the persisted file
@@ -65,6 +67,22 @@ net_pairs() { # dir
   fi
 }
 
+# --- IDS arm (--ids): firing predicates from the learned baseline store ----------
+# Currently keyed by baselines/rig-map.json (static IP -> workload), hence labelled
+# "ids-ip": on this rig it carries the same information as the net arm's src
+# tuple. It is NOT the join measurement; the cgroup-keyed arm lands with the probe.
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ids_pairs() { # dir -> firing predicates as literals (requires tools/baseline.sh learn)
+  "$BASE_DIR/tools/baseline.sh" evaluate "$1"
+}
+if [ "$IDS" = 1 ]; then
+  # fail loudly: a broken evaluator must never surface as a "0 events" cell
+  for d in "$A" "$B"; do
+    "$BASE_DIR/tools/baseline.sh" evaluate "$d" >/dev/null \
+      || { echo "separability: IDS evaluator failed on $d — no IDS cell reported" >&2; exit 2; }
+  done
+fi
+
 # --- arm evaluation ----------------------------------------------------------------
 arm() { # name extractor -> rc 0=separates, 1=no tier-1 separation, 3=no events in A
   local name="$1" extractor="$2" ta tb novel na nb n
@@ -75,7 +93,11 @@ arm() { # name extractor -> rc 0=separates, 1=no tier-1 separation, 3=no events 
   novel=$(comm -23 "$ta" "$tb" 2>/dev/null || true)
   n=$(printf '%s\n' "$novel" | grep -c . || true)
 
-  if [ "$na" -eq 0 ]; then
+  if [ "$na" -eq 0 ] && [ "${name#ids}" != "$name" ]; then
+    # an IDS emits alerts, not telemetry: no alert on A = does not separate
+    emit "$(printf '%-7s | silent on A (no predicate fired) -> does NOT separate' "$name")"
+    rm -f "$ta" "$tb"; return 1
+  elif [ "$na" -eq 0 ]; then
     emit "$(printf '%-7s | NO EVENTS in A (arm blind this window)' "$name")"
   elif [ "$n" -gt 0 ]; then
     emit "$(printf '%-7s | SEPARATES (tier-1): %s novel of %s literals' "$name" "$n" "$na")"
@@ -97,16 +119,22 @@ emit "=== separability: A=$(basename "$A") vs B=$(basename "$B") ==="
 ra=0; arm auditd auditd_pairs || ra=$?
 rf=0; arm falco  falco_pairs  || rf=$?
 rn=0; arm net    net_pairs    || rn=$?
+ri=3
+if [ "$IDS" = 1 ]; then ri=0; arm ids-ip ids_pairs || ri=$?; fi
 
 emit "--- verdict (suggested) ---"
+IDSSTAT=""
+if [ "$IDS" = 1 ]; then IDSSTAT=" ids-ip=$(describe "$ri")"; fi
 if [ "$ra" = 0 ] || [ "$rf" = 0 ] || [ "$rn" = 0 ]; then
   if [ "$ra" = 0 ] && [ "$rn" = 0 ]; then v="covered-both"
   elif [ "$ra" = 0 ]; then v="covered-host-only (auditd)"
   elif [ "$rf" = 0 ]; then v="covered-host-only (eBPF)"
   else v="covered-network-only"; fi
-  emit "VERDICT: $v  [auditd=$(describe "$ra") falco=$(describe "$rf") net=$(describe "$rn")]"
+  emit "VERDICT: $v  [auditd=$(describe "$ra") falco=$(describe "$rf") net=$(describe "$rn")$IDSSTAT]"
+elif [ "$ri" = 0 ]; then
+  emit "VERDICT: no single sensor arm separates; only ids-ip does (IP-keyed: NOT a join measurement)  [auditd=$(describe "$ra") falco=$(describe "$rf") net=$(describe "$rn")$IDSSTAT]"
 else
-  emit "VERDICT: no tier-1 separator on any arm -> join-required candidate (tier-2 manual) or blind-both"
+  emit "VERDICT: no tier-1 separator on any arm -> join-required candidate (tier-2 manual) or blind-both$IDSSTAT"
 fi
 
 # --- persist the report next to curated.md ------------------------------------------
