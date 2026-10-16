@@ -270,6 +270,39 @@ that flow-log keying misattributes — Zeek shows `tj-victim → IMDS` inside a 
 window (late RST), the probe shows no such connect there. An IP-keyed learner
 training on that window would learn `tj-victim → IMDS` as benign.
 
+### Amendments and predictions — replicate-2 completion session (registered 2026-10-16, before the session)
+
+**Amendments.**
+1. **Inter-pair quiet period:** `tj-pair.sh` waits until 180 s have passed since
+   the previous pair's attack ended (B's net window reaches 60 s back; late RSTs
+   arrive ~84 s after an unanswered SYN).
+2. **Extractor orientation** (defect 3 above) is part of the criterion from now on.
+3. **K1′ replaces K1** (session-level; implemented as
+   `tools/s0-check.sh --session <last-window> <session-probe-log>`), container-
+   originated TCP only:
+   (a) every Zeek conn record carrying an originator SYN has exactly one probe
+   `connect` with the same 4-tuple;
+   (b) every probe `connect` with `capture_start ≤ ts ≤ last_snapshot − 10 s` has
+   exactly one SYN-bearing Zeek record, `capture_start` = ts of the first
+   SYN-bearing Zeek record;
+   responder-only records (`history` starting `^`, `orig_pkts = 0`) are excluded
+   from (a), counted, and each must belong to a tuple with a probe `connect`.
+   *Disclosure:* K1′ was designed after seeing replicate-2 data and would pass on
+   it (0 / 0 / 0 dups / 0 orphans); that retrospective pass is **not** counted —
+   K1′ is decided on this session only. K2 and K3 unchanged (K3 applied to the S1
+   attack tuple, since S1v is not re-run).
+
+**Session.** Fresh rollback; probe live; pairs **1, p, 3** (the three with
+contaminated B windows), in that order, with the quiet period.
+
+| Round | Prediction |
+|---|---|
+| S1 | auditd: argv literals only; Falco 0 in A and B; net: the only A-only literals are `conn=172.17.0.2->169.254.169.254:80` and `sconn=172.17.0.2->169.254.169.254:80` → `covered-both` |
+| S-pivot | auditd: destination literals (argv `http://172.17.0.4/`, `laddr=172.17.0.4`); Falco 0; net: only `conn`/`sconn` `172.17.0.2->172.17.0.4:80` → `covered-both` |
+| S3 | auditd `--upload-file` argv; Falco 0; net `PUT` / `/upload` → `covered-both` |
+| clean B | no benign window contains a tuple whose probe `connect` lies in another pair's attack window |
+| S0 | K1′, K2, K3 all PASS → **GO** |
+
 Superseded expectation, kept for the record: the original guess that scenario 1 would be `covered-host-only` via a default Falco IMDS rule was **falsified** on 2026-09-25 — the deployed stable ruleset contains no IMDS rule, and the link-local flow *does* traverse `docker0`. Execution plan and decision log: [`CHECKPOINT.md`](../CHECKPOINT.md).
 
 ---
