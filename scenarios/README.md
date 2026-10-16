@@ -75,6 +75,7 @@ failure.
 | `tj-1-t1552.005-imds.sh` | T1552.005 | SCARLETEEL 1.0 — IMDS credential probe |
 | `tj-1-benign.sh` | — (benign twin) | same `docker exec` mechanics as tj-1, listener destination |
 | `tj-1v-imds-stealth.sh` | T1552.005 (variant) | adversary variation: argv character-identical to the poller, direct exec — erased the auditd separator (round S1v) |
+| `tj-pivot.sh` | T1021-class (variant) | lateral movement: victim curls the *poller* (only differing field vs the twin = destination) — first-ever victim↔poller edge; benign window reuses `tj-1-benign.sh` |
 | `tj-2-t1048.003-bash-tcp-exfil.sh` | T1048.003 | SCARLETEEL 2.0 — `dload()` base64-GET exfil via shell built-ins |
 | `tj-2-benign.sh` | — (benign twin) | bash in victim + legit transfer via curl to the listener |
 | `tj-3-t1567.002-paste-upload.sh` | T1567.002 | SCARLETEEL 2.0 — paste-service credential upload |
@@ -102,8 +103,10 @@ sudo tj-capture-stop
 ```
 
 Per-round analysis (host): `tools/separability.sh evidence/scenario-<n>
-evidence/scenario-<n>-benign` — per arm (auditd / Falco / Zeek+Suricata); verdicts
-land in `docs/threat-model.md`.
+evidence/scenario-<n>-benign` — per arm (auditd / Falco / Zeek+Suricata); the report
+is persisted to `evidence/scenario-<n>/separability.md` (the A−B residue; the raw
+superset — benign background, apparatus, padding — remains in `raw/` and
+`curated.md`). Verdicts land in `docs/threat-model.md`.
 
 ## Evidence layout
 

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # separability.sh — apply the Part D separability criterion (docs/threat-model-method.md)
-# to one paired observation.
+# to one paired observation, print the per-arm report, and persist it as
+# <attack-dir>/separability.md (next to curated.md) on every run.
 #
 # Usage: tools/separability.sh <attack-dir> <benign-dir>
 #   e.g. tools/separability.sh evidence/scenario-1 evidence/scenario-1-benign
 #
-# Arms: auditd (host syscall), falco (host runtime policy), net (Zeek+Suricata).
+# Arms: auditd (host syscall), Falco (host runtime policy), net (Zeek+Suricata).
 # Per arm it extracts (field,value) literals from each window, diffs A−B, and reports
 # tier-1 separating literals plus a suggested verdict per the decision matrix.
 #
@@ -20,6 +21,10 @@ set -euo pipefail
 
 A="${1:?usage: separability.sh <attack-dir> <benign-dir>}"
 B="${2:?usage: separability.sh <attack-dir> <benign-dir>}"
+REPORT=""
+
+# every report line goes to stdout AND accumulates for the persisted file
+emit() { printf '%s\n' "$*"; REPORT+="$*"$'\n'; }
 
 # --- literal extractors ------------------------------------------------------------
 auditd_pairs() { # dir
@@ -71,12 +76,14 @@ arm() { # name extractor -> rc 0=separates, 1=no tier-1 separation, 3=no events 
   n=$(printf '%s\n' "$novel" | grep -c . || true)
 
   if [ "$na" -eq 0 ]; then
-    printf '%-7s | NO EVENTS in A (arm blind this window)\n' "$name"
+    emit "$(printf '%-7s | NO EVENTS in A (arm blind this window)' "$name")"
   elif [ "$n" -gt 0 ]; then
-    printf '%-7s | SEPARATES (tier-1): %s novel of %s literals\n' "$name" "$n" "$na"
-    printf '%s\n' "$novel" | grep . | head -12 | sed 's/^/          A-only: /'
+    emit "$(printf '%-7s | SEPARATES (tier-1): %s novel of %s literals' "$name" "$n" "$na")"
+    while IFS= read -r l; do
+      [ -n "$l" ] && emit "          A-only: $l"
+    done < <(printf '%s\n' "$novel" | grep . | head -12)
   else
-    printf '%-7s | does NOT separate (no tier-1 literal; tier-2 combination = manual)\n' "$name"
+    emit "$(printf '%-7s | does NOT separate (no tier-1 literal; tier-2 combination = manual)' "$name")"
   fi
   rm -f "$ta" "$tb"
   [ "$na" -eq 0 ] && return 3
@@ -86,18 +93,38 @@ arm() { # name extractor -> rc 0=separates, 1=no tier-1 separation, 3=no events 
 
 describe() { case "$1" in 0) echo "sep" ;; 3) echo "0-events" ;; *) echo "no" ;; esac; }
 
-echo "=== separability: A=$(basename "$A") vs B=$(basename "$B") ==="
+emit "=== separability: A=$(basename "$A") vs B=$(basename "$B") ==="
 ra=0; arm auditd auditd_pairs || ra=$?
 rf=0; arm falco  falco_pairs  || rf=$?
 rn=0; arm net    net_pairs    || rn=$?
 
-echo "--- verdict (suggested) ---"
+emit "--- verdict (suggested) ---"
 if [ "$ra" = 0 ] || [ "$rf" = 0 ] || [ "$rn" = 0 ]; then
   if [ "$ra" = 0 ] && [ "$rn" = 0 ]; then v="covered-both"
   elif [ "$ra" = 0 ]; then v="covered-host-only (auditd)"
   elif [ "$rf" = 0 ]; then v="covered-host-only (eBPF)"
   else v="covered-network-only"; fi
-  echo "VERDICT: $v  [auditd=$(describe "$ra") falco=$(describe "$rf") net=$(describe "$rn")]"
+  emit "VERDICT: $v  [auditd=$(describe "$ra") falco=$(describe "$rf") net=$(describe "$rn")]"
 else
-  echo "VERDICT: no tier-1 separator on any arm -> join-required candidate (tier-2 manual) or blind-both"
+  emit "VERDICT: no tier-1 separator on any arm -> join-required candidate (tier-2 manual) or blind-both"
 fi
+
+# --- persist the report next to curated.md ------------------------------------------
+OUT="$A/separability.md"
+{
+  echo "# Separability — $(basename "$A") vs $(basename "$B")"
+  echo
+  echo "- generated: $(date -u +%FT%TZ) by \`tools/separability.sh\`"
+  echo "- A (attack window): \`$A\`"
+  echo "- B (matched benign window): \`$B\`"
+  echo "- criterion: tier-1 novel-literal set difference per arm"
+  echo "  (docs/threat-model-method.md Part D); auditd scoped to container-subject"
+  echo "  events; composite literals = timestamp-stripped argv lines and conn tuples."
+  echo "- raw windows (superset incl. benign background, apparatus, padding) live in"
+  echo "  \`raw/\` and \`curated.md\`; this file records the residue only."
+  echo
+  echo '```'
+  printf '%s' "$REPORT"
+  echo '```'
+} > "$OUT"
+echo "residue written: $OUT"
