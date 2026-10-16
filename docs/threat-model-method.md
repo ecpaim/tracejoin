@@ -190,6 +190,11 @@ Data: every window of the replay session below (probe live). Definitions:
 | K2 | **Identity resolution.** Every container-originated probe `connect` carries `cg = docker-<id>.scope` whose id prefix equals the container id that `identity.ndjson` assigns to that source IP (100 %) |
 | K3 | **Attack attribution.** In S1v's attack window, the tuple `172.17.0.2:<p> → 169.254.169.254:80` is present with tj-victim's `cg` and `comm=curl`; the poller's IMDS tuples carry tj-imds-poller's `cg` |
 
+*Format clarification (2026-10-16, after the unscored smoke test, before any S0 data):*
+the probe's `cg` field is the cgroup leaf truncated to 63 characters
+(`docker-` + 56 hex, no `.scope` suffix); K2 is evaluated, as written, by id-prefix
+match. The smoke test is not S0 evidence.
+
 NO-GO on any criterion (counts reported; no threshold adjusted after seeing data) →
 Phase 4 consumes Tetragon events (or a Falco catch-all rule in a separate,
 non-measured cross-validation session); the join layer is unaffected. A probe that

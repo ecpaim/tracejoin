@@ -8,8 +8,10 @@
  *   exec    : execve entry (comm = the image calling exec, file = the new binary)
  * each carrying the owner identity: pid, ppid, comm, cgroup id, and the cgroup-v2
  * leaf name read IN-KERNEL at event time (docker-<64hex>.scope under the rig's
- * systemd cgroup driver; truncated to BPFTRACE_STRLEN=64 -> "docker-" + 57 hex,
- * still unique). In-kernel identity survives container exit (no userspace lookup).
+ * systemd cgroup driver; str() truncates to 63 chars -> "docker-" + 56 hex, no
+ * ".scope" suffix -- still unique; resolve by id-prefix match against
+ * raw/identity.ndjson). In-kernel identity survives container exit.
+ * Smoke-tested 2026-10-16 on the guest (bpftrace 0.14, kernel 5.15.0-191).
  *
  * Flow orientation is the same for connect and accept (saddr/sport = originator,
  * daddr/dport = responder), so a container->container flow appears twice with the
