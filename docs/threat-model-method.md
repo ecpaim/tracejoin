@@ -142,6 +142,73 @@ Decision matrix:
 | S3 upload | host: argv literal `--upload-file`; net: `method=PUT` → `covered-both` | unchanged |
 | Rows 7/8/10/11 | expected genuine `join-required` (both sides individually ambiguous) — v1 | — |
 
+### Erratum — S2 Falco cell (recorded 2026-10-16)
+
+The S2 round's Falco "0 events" is a **collection artifact, not a measurement**.
+S2's window was sub-second (`t0 = t1 = 2026-10-08T21:21:23Z`); the collector queried
+`journalctl --since @T0 --until @T1`, and `--until @<epoch>` ends at `.000` of that
+second, so the query covered an empty interval (`raw/falco.json` is empty). An
+**unpaired diagnostic** re-run of `tj-2-t1048.003-bash-tcp-exfil.sh` on the same rig
+(2026-10-16T16:36:37Z, stock ruleset, `falcoctl` follow disabled — same
+`falco-rules:3` artifact as the original round) produced two deployed-rule alerts:
+*Redirect stdout/stdin to network connection* (Notice, `evt_type=dup2`,
+`connection=172.17.0.2:35042->172.17.0.3:80`, `process=bash`,
+`container_name=tj-victim`) — one for `printf … >&3` (bash dup2s the socket onto
+fd 1) and one for the `cat <&3` child (fd 0). The earlier explanation "fd 3 evades
+the fd 0/1/2 rule" is therefore wrong: bash's redirection moves the socket onto
+standard descriptors itself. Rounds with the same zero-length window: S3 (cell
+unverified; curl does not dup a socket onto stdio) and S-pivot (zero independently
+confirmed against the full journal of that session). S1/S1v had multi-second
+windows and are unaffected. The diagnostic run does not fill the cell; the paired
+replay below does.
+
+### Protocol amendments (registered 2026-10-16, before the replay session)
+
+1. **Host-window padding:** auditd and Falco queries use `[t0 − 1 s, t1 + 1 s]`
+   (`HOST_PAD`, both windows of a pair). Padding can only add events to a window.
+2. **Symmetric soak:** `sleep 25` after the benign twin **and** after the attack,
+   before each collect (removes the `stype=flow` / poller-`sconn` artifacts of S1v,
+   S2, S-pivot).
+3. **Probe live:** `tools/ebpf/tj-probe.bt` (guest bpftrace 0.14) runs for the whole
+   capture session; the collector windows its NDJSON with the net window into
+   `raw/probe.window.ndjson` and records `probe.state` in `meta.json`. The probe is
+   an IDS input, not a scored sensor arm; Falco stays on the stock ruleset (no local
+   rules during measured rounds — `rule_matching: first` means any added connect
+   rule would alter the Falco arm).
+4. **Identity snapshot:** each collect records `raw/identity.ndjson`
+   (`docker inspect`: name, id, image, IPs, network mode).
+
+### S0 — join-key probe go/no-go (registered 2026-10-16, before the first probe run)
+
+Data: every window of the replay session below (probe live). Definitions:
+*container-originated* = `orig_h`/`saddr` ∈ 172.17.0.0/16 \ {172.17.0.1}, TCP only;
+*comparison interval* = the window's net window minus 5 s at each edge.
+
+| # | Criterion (all must hold for GO) |
+|---|---|
+| K1 | **Tuple completeness, 1:1.** In each window's comparison interval, the multiset of container-originated Zeek `conn` 4-tuples equals the multiset of probe `ev=connect` 4-tuples; each tuple occurs exactly once on each side |
+| K2 | **Identity resolution.** Every container-originated probe `connect` carries `cg = docker-<id>.scope` whose id prefix equals the container id that `identity.ndjson` assigns to that source IP (100 %) |
+| K3 | **Attack attribution.** In S1v's attack window, the tuple `172.17.0.2:<p> → 169.254.169.254:80` is present with tj-victim's `cg` and `comm=curl`; the poller's IMDS tuples carry tj-imds-poller's `cg` |
+
+NO-GO on any criterion (counts reported; no threshold adjusted after seeing data) →
+Phase 4 consumes Tetragon events (or a Falco catch-all rule in a separate,
+non-measured cross-validation session); the join layer is unaffected. A probe that
+fails to load on bpftrace 0.14 is a tooling defect (fixed and re-run, recorded), not
+a kill.
+
+### Replay predictions — replicate 2 (registered 2026-10-16, before the replay session)
+
+S1, S1v, S-pivot, S2, S3 re-run as paired rounds under the amended protocol.
+
+| Round | Prediction |
+|---|---|
+| S1, S1v, S-pivot, S3 | Verdict and separator classes replicate round 1 exactly (S1: auditd argv + net src-tuple; S1v: auditd does not separate, net src-tuple only; S-pivot: auditd destination literals, net composite tuple; S3: auditd `--upload-file`, net `PUT /upload`). Falco: 0 events in A and B |
+| S2 | auditd and net replicate round 1; **Falco separates**: A contains ≥ 1 *Redirect stdout/stdin to network connection* alert (`evt_type=dup2`, `container_name=tj-victim`), B (curl twin) none. Verdict `covered-both` unchanged; Falco column becomes `sep`. *Disclosure: informed by the unpaired diagnostic run above — a replication target, not a blind prediction* |
+| all | Under symmetric soak, the `stype=flow` and poller-`sconn` A-only literals are **absent**; if present, recorded as artifacts |
+
+IDS-arm predictions for these windows (identity-keyed arm) are registered in a
+separate commit before the IDS analysis is run.
+
 Superseded expectation, kept for the record: the original guess that scenario 1 would be `covered-host-only` via a default Falco IMDS rule was **falsified** on 2026-09-25 — the deployed stable ruleset contains no IMDS rule, and the link-local flow *does* traverse `docker0`. Execution plan and decision log: [`CHECKPOINT.md`](../CHECKPOINT.md).
 
 ---
