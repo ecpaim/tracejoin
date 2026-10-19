@@ -74,18 +74,22 @@ net_pairs() { # dir
   fi
 }
 
-# --- IDS arm (--ids): firing predicates from the learned baseline store ----------
-# Currently keyed by baselines/rig-map.json (static IP -> workload), hence labelled
-# "ids-ip": on this rig it carries the same information as the net arm's src
-# tuple. It is NOT the join measurement; the cgroup-keyed arm lands with the probe.
+# --- IDS arms (--ids): firing predicates from the learned baseline store ----------
+# Keying ablation (D18): ids-ipstatic (static IP map = the vendor allowlist),
+# ids-iplive (collect-time IP->container map = the flow-observability competitor),
+# ids-join (probe cgroup = the connect-point record, incl. process context).
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ids_pairs() { # dir -> firing predicates as literals (requires tools/baseline.sh learn)
-  "$BASE_DIR/tools/baseline.sh" evaluate "$1"
+ids_eval() { "$BASE_DIR/tools/baseline.sh" evaluate "$1"; }
+ids_keys() { # dir arm -> that arm's firing lines
+  ids_eval "$1" | grep -F "IDS-FIRE $2 " || true
 }
+ids_keys_ipstatic() { ids_keys "$1" ipstatic; }
+ids_keys_iplive()   { ids_keys "$1" iplive; }
+ids_keys_join()     { ids_keys "$1" join; }
 if [ "$IDS" = 1 ]; then
   # fail loudly: a broken evaluator must never surface as a "0 events" cell
   for d in "$A" "$B"; do
-    "$BASE_DIR/tools/baseline.sh" evaluate "$d" >/dev/null \
+    ids_eval "$d" >/dev/null \
       || { echo "separability: IDS evaluator failed on $d — no IDS cell reported" >&2; exit 2; }
   done
 fi
@@ -126,22 +130,28 @@ emit "=== separability: A=$(basename "$A") vs B=$(basename "$B") ==="
 ra=0; arm auditd auditd_pairs || ra=$?
 rf=0; arm falco  falco_pairs  || rf=$?
 rn=0; arm net    net_pairs    || rn=$?
-ri=3
-if [ "$IDS" = 1 ]; then ri=0; arm ids-ip ids_pairs || ri=$?; fi
+ri1=3; ri2=3; rj=3
+if [ "$IDS" = 1 ]; then
+  ri1=0; arm ids-ipstatic ids_keys_ipstatic || ri1=$?
+  ri2=0; arm ids-iplive   ids_keys_iplive   || ri2=$?
+  rj=0;  arm ids-join     ids_keys_join     || rj=$?
+fi
 
 emit "--- verdict (suggested) ---"
 IDSSTAT=""
-if [ "$IDS" = 1 ]; then IDSSTAT=" ids-ip=$(describe "$ri")"; fi
+if [ "$IDS" = 1 ]; then IDSSTAT=" ids-ipstatic=$(describe "$ri1") ids-iplive=$(describe "$ri2") ids-join=$(describe "$rj")"; fi
 if [ "$ra" = 0 ] || [ "$rf" = 0 ] || [ "$rn" = 0 ]; then
   if [ "$ra" = 0 ] && [ "$rn" = 0 ]; then v="covered-both"
   elif [ "$ra" = 0 ]; then v="covered-host-only (auditd)"
   elif [ "$rf" = 0 ]; then v="covered-host-only (eBPF)"
   else v="covered-network-only"; fi
   emit "VERDICT: $v  [auditd=$(describe "$ra") falco=$(describe "$rf") net=$(describe "$rn")$IDSSTAT]"
-elif [ "$ri" = 0 ]; then
-  emit "VERDICT: no single sensor arm separates; only ids-ip does (IP-keyed: NOT a join measurement)  [auditd=$(describe "$ra") falco=$(describe "$rf") net=$(describe "$rn")$IDSSTAT]"
+elif [ "$rj" = 0 ] && [ "$ri1" != 0 ] && [ "$ri2" != 0 ]; then
+  emit "VERDICT: join-required, measured (only ids-join separates; the ip-keyed arms are silent)  [auditd=$(describe "$ra") falco=$(describe "$rf") net=$(describe "$rn")$IDSSTAT]"
+elif [ "$rj" = 0 ]; then
+  emit "VERDICT: no single sensor arm separates; ids arms separate (keying-dependent)  [auditd=$(describe "$ra") falco=$(describe "$rf") net=$(describe "$rn")$IDSSTAT]"
 else
-  emit "VERDICT: no tier-1 separator on any arm -> join-required candidate (tier-2 manual) or blind-both$IDSSTAT"
+  emit "VERDICT: no tier-1 separator on any arm -> join-required candidate (tier-2 manual) or blind-both$IDSSTAT]"
 fi
 
 # --- persist the report next to curated.md ------------------------------------------

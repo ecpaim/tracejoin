@@ -330,6 +330,60 @@ session a, whose B windows were clean): every round-1 verdict and separator clas
 replicates (n = 2); S2's Falco cell is `sep` (stock *Redirect stdout/stdin*), S3's
 Falco cell is a verified 0.
 
+### Identity-scoped IDS — initial experiment (registered 2026-10-16, before the session and before any IDS scoring of real windows)
+
+**Design.** Input = the connect-point record (`raw/probe.window.ndjson` +
+`raw/identity.ndjson` per window). Scope: container-originated events only
+(`cg` starts `docker-`). Learning source: a **dedicated learning window** (scenario
+id `learn`, twins looped ~5 min + standing benign background), then **frozen**
+(`tools/baseline.sh learn`); FP are out-of-sample by construction (a fresh benign
+window `fpcheck`, plus every round's own B). Predicates, first-ever semantics
+(D12 age-out fallback decided by the `bc` round, not here):
+
+| Predicate | Key | Arms |
+|---|---|---|
+| P-edge | `src → dst:port` | all |
+| P-procflow | `src \| comm → dst:port` | join only |
+| P-exec | `image \| binary` | join only |
+
+Arms = identity-keying ablation over the same events (D18): **ipstatic**
+(`baselines/rig-map.json`, static IP→workload — the vendor allowlist pattern),
+**iplive** (the window's own `identity.ndjson` — collect-time IP→container, the
+flow-observability competitor), **join** (probe cgroup). The ip arms carry the
+information set of flow sensors + an identity map — **no per-connection process
+context** (the schema gap measured in the previous rounds: auditd lacks identity,
+Zeek lacks process) — hence P-procflow/P-exec are join-only *by the competitor's
+schema, not by fiat*. Destination naming uniform across arms (container name from
+the window snapshot, else raw IP).
+
+*Risks registered before the run:* (i) tj-victim and tj-imds-poller share the
+`nginx` image, so P-exec cannot catch S1v (`(nginx, curl)` is learned benign) — a
+measured property of split keying; (ii) the churn attack window will also contain
+the poller background, so ipstatic fires on A and B alike (via misattribution);
+its *attack-edge* behavior is the prediction; (iii) tools were developed and
+validated on synthetic fixtures only; real-window scoring starts after this
+registration. **S0 K1′ is decided in this same session** (probe started before the
+capture).
+
+**Predictions.** Re-scores use the frozen `learn` store (out-of-sample: those
+windows are not learned from).
+
+| Round (source) | ipstatic | iplive | join |
+|---|---|---|---|
+| S1, S1v re-score (r2b/r2a) | fire P-edge `tj-victim>169.254.169.254:80` | fire | fire (+ P-procflow `tj-victim\|curl>…`) |
+| S-pivot re-score (r2b) | fire `tj-victim>tj-imds-poller:80` | fire | fire (+ P-procflow) |
+| S2 re-score (r2a) | **silent** (edge benign) | **silent** | **fire**: P-procflow `tj-victim\|bash>tj-listener:80` + P-exec `nginx\|/usr/bin/base64`, `nginx\|/usr/bin/rm` |
+| S3 re-score (r2b) | silent | silent | **silent — predicted miss** (only net content separates) |
+| fpcheck (fresh benign) | 0 | 0 | 0 |
+| churn benign (r3) | **FP**: twin misattributed `tj-imds-poller>tj-listener:80` + poller background misattributed `tj-victim>IMDS` | 0 | 0 |
+| churn attack (r3) | fires via misattributed background; **the attack tuple itself is silent (FN)** | fire `tj-victim>IMDS` | fire (+ P-procflow) |
+| 1s sidecar (r3) | **silent** (shared IP resolves to the netns owner = the poller; edge benign) | **silent** | **fire**: P-edge `tj-svictim>IMDS` (+ P-procflow) → **join-required, measured** |
+| bc benign-change (r3) | fires: new IP unmapped → raw-IP edge novel | fires: `tj-health>tj-listener:80` | fires: P-edge + P-procflow (2 predicates) |
+| 1p poller-compromise (r3) | silent | silent | **silent — recorded blind spot** (edge, process and image all inside the poller's baseline) |
+
+Verdicts: 1s (and S2 re-score) → `join-required, measured (only ids-join
+separates)`; 1p → blind-both; the bc count is the D12 decision input.
+
 Superseded expectation, kept for the record: the original guess that scenario 1 would be `covered-host-only` via a default Falco IMDS rule was **falsified** on 2026-09-25 — the deployed stable ruleset contains no IMDS rule, and the link-local flow *does* traverse `docker0`. Execution plan and decision log: [`CHECKPOINT.md`](../CHECKPOINT.md).
 
 ---

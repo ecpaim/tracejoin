@@ -1,94 +1,118 @@
 #!/usr/bin/env bash
-# baseline.sh — identity-scoped learned baselines (CHECKPOINT D11/D12) and the
-# IDS evaluation arm.
+# baseline.sh v2 — identity-scoped learned baselines (D10/D11/D18) and the IDS
+# evaluation arms, consumed from the eBPF connect-point record (probe NDJSON).
 #
 # Usage:
-#   tools/baseline.sh learn [benign-dir ...]   # default: evidence/scenario-*-benign
-#   tools/baseline.sh evaluate <evidence-dir>  # prints firing predicates, one per line
-#   tools/baseline.sh show                     # print the learned baseline store
+#   tools/baseline.sh learn <learn-window-dir>   # frozen store -> baselines/baselines.json
+#   tools/baseline.sh evaluate <evidence-dir>     # prints firing predicates, one per line
+#   tools/baseline.sh show
+#   BASELINE_OUT=<file> overrides the store path (validation only).
 #
-# Design (D11/D12):
-#   - graph baseline: identity-pair edges learned from benign Zeek conn windows;
-#     FIRST-EVER semantics (edges never age out; the age-out fallback is D12 and
-#     is decided by the benign-change FP round, not by this tool).
-#   - destination baseline: per-workload destination sets (identity-scoped).
-#   - behavior baseline (per-image argv): DEFERRED — requires identity-attributed
-#     argv, i.e. the Phase-4 recorder or Tetragon events; the offline IP join
-#     cannot attribute execve events to containers (pids are not stable keys).
-#     Recorded honestly rather than approximated by content matching.
-#
-# Identity resolution: baselines/rig-map.json maps rig IPs to workload names —
-# the offline join, exact on the fixed 3-container rig; replaced by cgroup
-# resolution when the recorder lands. Consequence for interpretation: S2/S3-style
-# attacks whose edges are IN the benign graph (victim->listener) are correctly
-# silent under graph/destination predicates — they are the behavior predicate's
-# cases (deferred), matching the pre-registered predictions.
+# Design (method doc Part D, "identity-scoped IDS — initial experiment"):
+#   - Learning source: the DEDICATED learning window only (scenario id "learn"),
+#     never the evaluation windows; the store is frozen at learn time.
+#     False positives are therefore always out-of-sample.
+#   - Scope: container-originated events only (cg starts with "docker-"),
+#     matching the monitored estate.
+#   - Predicates (first-ever semantics; D12 age-out fallback is decided by the
+#     benign-change round, not here):
+#       P-edge      (src workload -> dst:port)          — all arms
+#       P-procflow  (src workload | comm -> dst:port)   — join arm only
+#       P-exec      (image | new binary)                — join arm only
+#   - Arms = identity-keying ablation over the SAME probe events (D18):
+#       ipstatic  src keyed by baselines/rig-map.json (the vendor allowlist pattern)
+#       iplive    src keyed by the window's own raw/identity.ndjson (collect-time
+#                 IP->container map; the flow-observability competitor)
+#       join      src keyed by the probe's cgroup (connect-point identity)
+#     The ip arms carry the information set of flow sensors + an identity map:
+#     no per-connection process context — the measured schema gap of the
+#     previous chapter. Destination naming is uniform across arms (container
+#     name from the window's identity snapshot, else the raw IP).
+#   - Honest failure: a window without probe data makes learn/evaluate exit
+#     non-zero — an absent probe must never surface as a silent IDS cell.
 set -euo pipefail
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MAP="$BASE_DIR/baselines/rig-map.json"
-BOUT="$BASE_DIR/baselines/baselines.json"
+BOUT="${BASELINE_OUT:-$BASE_DIR/baselines/baselines.json}"
 
-ident() { jq -r --arg ip "$1" '.[$ip].name // "unknown"' "$MAP"; }
-
-edges_of() { # dir -> one "orig-name>resp-name:port" per conn row
-  local d="$1" ts o op r p rest
-  [ -s "$d/raw/zeek-conn.window.txt" ] || return 0
-  while IFS=$'\t' read -r ts o op r p rest; do
-    [ -n "${o:-}" ] && [ -n "${r:-}" ] && printf '%s>%s:%s\n' "$(ident "$o")" "$(ident "$r")" "$p"
-  done < "$d/raw/zeek-conn.window.txt"
+# --- event -> predicate-key mapping, per arm ----------------------------------------
+arm_keys() { # <dir> <arm>  ->  "P-xxx <key>" lines (caller dedups)
+  local d="$1" arm="$2" probe="$1/raw/probe.window.ndjson" ident="$1/raw/identity.ndjson"
+  [ -s "$probe" ] || { echo "baseline: no probe window in $d (probe not live) — refusing a silent cell" >&2; return 2; }
+  [ -s "$ident" ] || { echo "baseline: no identity snapshot in $d" >&2; return 2; }
+  case "$arm" in
+    ipstatic)
+      jq -r --slurpfile m "$MAP" --slurpfile idn "$ident" '
+        def srcn($ip): ($m[0][$ip].name // $ip);
+        def dstn($ip): (($idn[]? | select((.ips // []) | index($ip)) | .name) // $ip);
+        select(.ev == "connect" and ((.cg // "") | startswith("docker-")))
+        | "P-edge " + srcn(.saddr) + ">" + dstn(.daddr) + ":" + (.dport | tostring)' "$probe" ;;
+    iplive)
+      jq -r --slurpfile idn "$ident" '
+        def srcn($ip): (($idn[]? | select((.ips // []) | index($ip)) | .name) // $ip);
+        def dstn($ip): (($idn[]? | select((.ips // []) | index($ip)) | .name) // $ip);
+        select(.ev == "connect" and ((.cg // "") | startswith("docker-")))
+        | "P-edge " + srcn(.saddr) + ">" + dstn(.daddr) + ":" + (.dport | tostring)' "$probe" ;;
+    join)
+      jq -r --slurpfile idn "$ident" '
+        def cg2($cg): ($idn[]? | select(.id | startswith($cg[7:])) | .name);
+        def cgi($cg): ($idn[]? | select(.id | startswith($cg[7:])) | .image);
+        def srcn($cg): (cg2($cg) // ("unresolved:" + $cg));
+        def dstn($ip): (($idn[]? | select((.ips // []) | index($ip)) | .name) // $ip);
+        select(((.cg // "") | startswith("docker-")))
+        | if .ev == "connect" then
+            ("P-edge " + srcn(.cg) + ">" + dstn(.daddr) + ":" + (.dport | tostring)),
+            ("P-procflow " + srcn(.cg) + "|" + (.comm // "?") + ">" + dstn(.daddr) + ":" + (.dport | tostring))
+          elif .ev == "exec" then
+            ("P-exec " + (cgi(.cg) // "?") + "|" + (.file // "?"))
+          else empty end' "$probe" ;;
+    *) echo "baseline: unknown arm $arm" >&2; return 2 ;;
+  esac
 }
 
 cmd_learn() {
-  local dirs=() d tmp n
-  if [ $# -gt 0 ]; then dirs=("$@"); else
-    for d in "$BASE_DIR"/evidence/scenario-*-benign; do [ -d "$d" ] && dirs+=("$d"); done
-  fi
-  [ "${#dirs[@]}" -gt 0 ] || { echo "baseline: no benign dirs found" >&2; exit 1; }
-  n=${#dirs[@]}
-  tmp=$(mktemp)
-  for d in "${dirs[@]}"; do
-    edges_of "$d"
-  done | sort -u > "$tmp"
-  mkdir -p "$BASE_DIR/baselines"
-  jq -n --arg when "$(date -u +%FT%TZ)" \
-        --arg n "$n" \
-        --argjson edges "$(jq -R -s 'split("\n") | map(select(length > 0))' "$tmp")" '
-    ($edges | map(capture("^(?<o>[^>]+)>(?<r>[^:]+):(?<p>.+)$"))) as $parsed |
-    {
-      learned_at: $when,
-      learned_from: ($n + " benign windows"),
-      edges: $edges,
-      destinations: ($parsed | group_by(.o)
-                           | map({ key: .[0].o, value: (map("\(.r):\(.p)") | unique) })
-                           | from_entries),
-      notes: ["first-ever edge semantics (D12 fallback pending benign-change round)",
-              "behavior predicate deferred: needs identity-attributed argv (Phase-4 recorder)"]
-    }' > "$BOUT"
-  rm -f "$tmp"
-  echo "learned $BOUT ($n benign windows):"
-  jq -r '.edges[] | "  edge: \(.)"' "$BOUT"
-  jq -r '.destinations | to_entries[] | "  dest[\(.key)]: \(.value | join(", "))"' "$BOUT"
+  local d="${1:?usage: baseline.sh learn <learn-window-dir>}" t arm
+  t=$(mktemp -d)
+  for arm in ipstatic iplive join; do
+    arm_keys "$d" "$arm" | sort -u > "$t/$arm" || return 2
+  done
+  mkdir -p "$(dirname "$BOUT")"
+  jq -n --arg when "$(date -u +%FT%TZ)" --arg from "$d" \
+        --argjson ipstatic "$(jq -R -s 'split("\n") | map(select(length > 0))' "$t/ipstatic")" \
+        --argjson iplive   "$(jq -R -s 'split("\n") | map(select(length > 0))' "$t/iplive")" \
+        --argjson join     "$(jq -R -s 'split("\n") | map(select(length > 0))' "$t/join")" '
+    { learned_at: $when,
+      learned_from: $from,
+      scope: "container-originated probe events (cg ^docker-); first-ever semantics; D12 age-out pending the benign-change round",
+      arms: { ipstatic: {keys: $ipstatic},
+              iplive:   {keys: $iplive},
+              join:     {keys: $join} },
+      notes: ["ip arms = flow sensors + identity map: no per-connection process context (schema gap, previous chapter)",
+              "destination naming uniform: container name from the window identity snapshot, else raw IP",
+              "learn source = the dedicated learning window only; FP are out-of-sample by construction"] }' > "$BOUT"
+  rm -rf "$t"
+  echo "learned (frozen) $BOUT from $d:"
+  for arm in ipstatic iplive join; do
+    printf '  %-9s %s keys, e.g. %s\n' "$arm" "$(jq -r --arg a "$arm" '.arms[$a].keys | length' "$BOUT")" \
+      "$(jq -r --arg a "$arm" '.arms[$a].keys[0] // "-"' "$BOUT")"
+  done
 }
 
 cmd_evaluate() {
-  local d="$1" e o rp
+  local d="${1:?usage: baseline.sh evaluate <dir>}" arm known
   [ -s "$BOUT" ] || { echo "baseline: run 'learn' first" >&2; exit 1; }
   [ -d "$d" ] || { echo "baseline: no such dir: $d" >&2; exit 1; }
-  edges_of "$d" | sort -u | while IFS= read -r e; do
-    [ -n "$e" ] || continue
-    o="${e%%>*}"; rp="${e#*>}"
-    if ! jq -e --arg e "$e" '.edges | index($e)' "$BOUT" >/dev/null; then
-      echo "IDS-FIRE graph $e"
-    fi
-    if ! jq -e --arg o "$o" --arg rp "$rp" '(.destinations[$o] // []) | index($rp)' "$BOUT" >/dev/null; then
-      echo "IDS-FIRE dest $o -> $rp"
-    fi
+  known=$(mktemp)
+  for arm in ipstatic iplive join; do
+    jq -r --arg a "$arm" '.arms[$a].keys[]' "$BOUT" | sort -u > "$known"
+    arm_keys "$d" "$arm" | sort -u | comm -23 - "$known" | sed "s/^/IDS-FIRE $arm /"
   done
+  rm -f "$known"
 }
 
 case "${1:-}" in
   learn)    shift; cmd_learn "$@" ;;
-  evaluate) shift; cmd_evaluate "${1:?usage: baseline.sh evaluate <dir>}" ;;
+  evaluate) shift; cmd_evaluate "$@" ;;
   show)     [ -s "$BOUT" ] && jq . "$BOUT" || { echo "no baseline store yet" >&2; exit 1; } ;;
-  *) echo "usage: tools/baseline.sh {learn [dirs...] | evaluate <dir> | show}" >&2; exit 1 ;;
+  *) echo "usage: tools/baseline.sh {learn <learn-window-dir> | evaluate <dir> | show}" >&2; exit 1 ;;
 esac
