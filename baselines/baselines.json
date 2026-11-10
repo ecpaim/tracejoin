@@ -1,20 +1,60 @@
 {
-  "learned_at": "2026-10-16T15:06:12Z",
-  "learned_from": "5 benign windows",
-  "edges": [
-    "tj-imds-poller>IMDS:80",
-    "tj-victim>tj-listener:80"
-  ],
-  "destinations": {
-    "tj-imds-poller": [
-      "IMDS:80"
-    ],
-    "tj-victim": [
-      "tj-listener:80"
-    ]
+  "learned_at": "2026-10-20T17:00:36Z",
+  "learned_from": "evidence/r4/scenario-learn",
+  "scope": "container-originated probe events (cg ^docker-); first-ever semantics; D12 age-out pending the benign-change round",
+  "arms": {
+    "ipstatic": {
+      "keys": [
+        "P-edge tj-imds-poller>169.254.169.254:80",
+        "P-edge tj-victim>tj-listener:80"
+      ]
+    },
+    "iplive": {
+      "keys": [
+        "P-edge tj-imds-poller>169.254.169.254:80",
+        "P-edge tj-victim>tj-listener:80"
+      ]
+    },
+    "join": {
+      "keys": [
+        "P-edge tj-imds-poller>169.254.169.254:80",
+        "P-edge tj-victim>tj-listener:80",
+        "P-exec nginx|/docker-entrypoint.d/10-listen-on-ipv6-by-default.sh",
+        "P-exec nginx|/docker-entrypoint.d/20-envsubst-on-templates.sh",
+        "P-exec nginx|/docker-entrypoint.d/30-tune-worker-processes.sh",
+        "P-exec nginx|/docker-entrypoint.sh",
+        "P-exec nginx|/proc/self/fd/6",
+        "P-exec nginx|/usr/bin/awk",
+        "P-exec nginx|/usr/bin/basename",
+        "P-exec nginx|/usr/bin/bash",
+        "P-exec nginx|/usr/bin/cat",
+        "P-exec nginx|/usr/bin/curl",
+        "P-exec nginx|/usr/bin/cut",
+        "P-exec nginx|/usr/bin/dpkg-query",
+        "P-exec nginx|/usr/bin/find",
+        "P-exec nginx|/usr/bin/grep",
+        "P-exec nginx|/usr/bin/md5sum",
+        "P-exec nginx|/usr/bin/rm",
+        "P-exec nginx|/usr/bin/sed",
+        "P-exec nginx|/usr/bin/sh",
+        "P-exec nginx|/usr/bin/sleep",
+        "P-exec nginx|/usr/bin/sort",
+        "P-exec nginx|/usr/bin/touch",
+        "P-exec nginx|/usr/local/bin/nginx",
+        "P-exec nginx|/usr/local/bin/sh",
+        "P-exec nginx|/usr/local/sbin/nginx",
+        "P-exec nginx|/usr/local/sbin/sh",
+        "P-exec nginx|/usr/sbin/nginx",
+        "P-exec nginx|/usr/sbin/sh",
+        "P-exec python:3-slim|/usr/local/bin/python",
+        "P-procflow tj-imds-poller|curl>169.254.169.254:80",
+        "P-procflow tj-victim|curl>tj-listener:80"
+      ]
+    }
   },
   "notes": [
-    "first-ever edge semantics (D12 fallback pending benign-change round)",
-    "behavior predicate deferred: needs identity-attributed argv (Phase-4 recorder)"
+    "ip arms = flow sensors + identity map: no per-connection process context (schema gap, previous chapter)",
+    "destination naming uniform: container name from the window identity snapshot, else raw IP",
+    "learn source = the dedicated learning window only; FP are out-of-sample by construction"
   ]
 }

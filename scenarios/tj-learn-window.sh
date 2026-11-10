@@ -18,11 +18,13 @@ probe_alive() { [ -s "$PROBE_LOG" ] || return 1
   [ "$(wc -l < "$PROBE_LOG")" -gt "$n0" ]; }
 probe_alive || { echo "ABORT: probe not running/growing ($PROBE_LOG) — start it before the capture" >&2; exit 1; }
 
+# Amendment 2026-10-20 (r4): LEARN_T0 lets the operator timestamp the window
+# BEFORE the estate setup, so the images' startup chains are captured and
+# learned. Usage: t0=$(date -u +%FT%TZ); LEARN_T0=$t0 bash tj-learn-window.sh
+t0="${LEARN_T0:-$(date -u +%FT%TZ)}"
+echo "=== LEARN window begin $t0 (setup runs inside the window)"
 ./setup-listener.sh >/dev/null
 ./setup-imds-poller.sh >/dev/null
-
-t0=$(date -u +%FT%TZ)
-echo "=== LEARN window begin $t0 (iters=$LEARN_ITERS)"
 for i in $(seq "$LEARN_ITERS"); do
   echo "--- learn iteration $i/$LEARN_ITERS $(date -u +%T)"
   bash tj-1-benign.sh >/dev/null

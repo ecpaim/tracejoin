@@ -30,4 +30,5 @@ lab/vm/*.sock
 *.swp
 .DS_Store
 CHECKPOINT.md
-CLAUDE.md
+CLAUDE.mdrw-pass/
+rw-pass/

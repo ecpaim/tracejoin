@@ -384,6 +384,147 @@ windows are not learned from).
 Verdicts: 1s (and S2 re-score) → `join-required, measured (only ids-join
 separates)`; 1p → blind-both; the bc count is the D12 decision input.
 
+### Results — identity-scoped IDS initial experiment (recorded 2026-10-19, after the session; evidence `evidence/r3/`)
+
+Session 21:29–21:45 UTC, fresh rollback, probe live (10298 lines, 0 non-JSON),
+started before the capture. L window 21:29:55–21:32:26; frozen store:
+ipstatic/iplive 2 edges; join = 2 edges + 2 procflows + 6 execs (the twins' own
+`rm`/`cat` are image-benign, confirming the pre-flagged S2 partial).
+
+| Round | Predicted | Measured |
+|---|---|---|
+| fpcheck | 0 / 0 / 0 | **0 / 0 / 0** ✓ (out-of-sample FP = 0) |
+| S1, S1v re-score (r2b/r2a) | all arms fire P-edge victim→IMDS (+ join procflow) | ✓ exactly |
+| S-pivot re-score (r2b) | all arms fire victim→poller (+ join procflow) | ✓ exactly |
+| S2 re-score (r2a) | ip arms silent; join fires P-procflow + P-exec base64, rm | ip arms silent ✓; join fires P-procflow + **P-exec base64 only** (rm/cat image-benign) — the pre-flagged partial |
+| S3 re-score (r2b) | all silent | ✓ all silent — the predicted miss |
+| churn | ipstatic FP on B, FN on the attack tuple; iplive/join 0 on B, fire on A | ipstatic: fires on A **and** B (standing-background + twin misattribution; the attack tuple itself is silent — FN confirmed). **iplive: fires on A and B — B contaminated** (diagnosis 1). **join: fires on A with the true attack attribution (cg = tj-victim) and separates**, because its B-window firings carry `unresolved:<removed-cg>` keys that do not collide with the attack key; iplive's B-window contamination produced the *same* key as the attack (collect-time map has no history), masking its separation. Prediction partially falsified as collected; diagnosis 1 below; re-run registered |
+| 1s sidecar | ip arms silent; join fires P-edge svictim→IMDS → join-required | join fires **P-edge `tj-svictim>IMDS:80`** ✓ (A-only; the designed cell) **+ 17 P-exec** (svictim's default-CMD startup chain, diagnosis 2). iplive silent ✓ (the shared IP resolves to the netns owner = the poller — the pod-level attribution situation). ipstatic fires on A **and** B (post-churn standing misattribution, same key) → does not separate. **auditd separates via 46 argv literals — the deployment's startup chain** (docker-entrypoint, envsubst, nginx…), not the probe action. Suggested verdict `covered-host-only`; the identity cell (svictim→IMDS) is join's alone — the round conflates attack-deployment with attack-action, recorded as such |
+| bc benign-change | ipstatic 1, iplive 1, join 2 | **ipstatic 3** (1 designed raw-IP edge + **2 post-churn standing misattributions** — the static map stays wrong for the rest of the session), **iplive 1** ✓, **join 7** (edge + procflow ✓ + **5 startup P-exec**, diagnosis 2) |
+| 1p poller-compromise | all silent → blind spot | ✓ **all silent** — auditd, Falco, net, and all three IDS arms. The recorded blind spot: edge, process and image all inside the poller's baseline |
+
+**Diagnosis 1 — the swap landed inside B's padded net window.** The old poller
+connected from 172.17.0.4 until 21:34:23; B's net window starts 21:33:43. The
+collect-time map (iplive) is correct at collect time but has no history, so it
+maps the pre-swap stratum to the post-swap layout (old-poller connects →
+"tj-victim→IMDS" = the attack key, masking separation). The probe's cg is inside
+the event: the same connects carry the *removed* container's cg and fire
+`unresolved:` keys, which do not collide. The honest reading: the join record
+attributes correctly even across a layout change inside the window; both IP maps
+cannot. **Amendment (registered for the re-run):** `tj-churn-setup.sh` completes
+≥ 70 s before the pair's t_b0; the churn pair is re-run next session under the
+original prediction.
+
+**Diagnosis 2 — deployment cold-start burst.** The L window cannot learn the
+nginx startup chain because the original containers booted (21:28:39) before
+the probe attached (21:29:21). A container deployed mid-round therefore fires
+its image's entrypoint chain (measured: full default-CMD chain ≈ 18 exec keys
+for svictim; `sh`-CMD chain 5 for tj-health — including four PATH-search execve
+attempts the probe logs). With a recorder running since estate boot, a
+known-image deployment costs only its new edges + procflows (measured for the
+curl-loop workload: 1 edge + 1 procflow = 2 alerts); a new image costs its
+startup chain. This bounds the base experiment's numbers from below/above
+respectively.
+
+**D12 decision input (bc):** per-deployment cost under a persistent recorder —
+known image: 2 alerts (first edge + first procflow); new image: + its startup
+chain (~18); first-ever semantics never age out (each new workload re-alerts on
+its distinct new edges). Static-map aftermath: after any address change, the
+static arm alerts on all standing traffic until the map is edited (measured: 2
+FPs per window for the rest of the session). The age-out decision itself
+belongs to D12's owner with these numbers.
+
+**S0.** K1′ as registered: **FAIL** — (a) 0 SYN-bearing Zeek records without a
+probe connect; (b) 0 probe connects without a SYN record; 0 duplicates; but 6
+responder-only orphans. All six RSTs (21:30:05–21:30:40) answer SYNs from
+[21:28:39, 21:29:21] — the poller's connects between its start and the probe's
+first event; all six satisfy RST_ts < probe_start + 84 s. Third consecutive
+failure of the same class: sensor-interval bookkeeping at sensor start, never
+probe completeness (0 missed, 0 spurious, 0 duplicates in three sessions
+wherever both sensors ran). **K1″ registered (decided on the next session):**
+as K1′, with the orphan clause bounded — *responder-only orphans with
+RST_ts ≥ probe_start + 84 s must be 0* (the probe must have been running at
+their SYN time). K2: PASS 7/9 windows; the two misses are the designed
+divergence phenomena (churn: pre-swap stratum; 1s: the sidecar connecting from
+the shared address) — criterion scope, not probe defects; each miss is a
+connect whose cg differs from the IP-map attribution, i.e. the phenomenon the
+rounds exist to produce. K3: PASS (churn attack tuple cg = tj-victim, comm =
+curl; poller tuples cg = tj-imds-poller; sidecar tuple cg = tj-svictim).
+
+Annotation: the net arm "separates" on churn via `sconn=172.17.0.2→IMDS:80` —
+the *new poller's standing background tuple*, absent from B only because
+Suricata writes unanswered-flow records ~60–84 s late and B was collected
+before its records existed (the §2.5 constraint; not a separator claim).
+
+### Amendments and predictions — session r4: churn re-run and boot-inclusive learning (registered 2026-10-20, before the session)
+
+Scope decision: of the four r3 artifact annotations, **d (pre-reassignment traffic
+inside B's window) and f (unlearned startup chains) are re-run**; a (the sidecar
+deployment's argv separation) and c (flow-sensor write lag on the reassignment
+net cell) stay as recorded annotations.
+
+**Amendments.**
+1. **Probe before container creation** (extends 2026-10-16c): the probe starts
+   before `setup-listener.sh`/`setup-imds-poller.sh` and before the capture. No
+   pre-probe SYNs can exist, so K1″'s orphan clause is expected to hold trivially,
+   and the estate's container boots are captured by the probe.
+2. **Boot-inclusive learning window:** the learning window's `t0` is taken before
+   the estate setup, so the frozen store learns the images' startup chains. The
+   credential agent deploys as `nginx sh -c "while …"` — the same image and
+   command form as the benign-change workload — so the exact startup keys that
+   produced the r3 artifact (entrypoint scripts, `sh` PATH-search attempts) are
+   learned benign.
+3. **One store for the whole table:** the r4 frozen store replaces the r3 store;
+   every cell — including re-scores of existing windows (r2a/r2b five pairs and
+   r3's `1s`/`1p`/`bc`/`churn` windows) — is scored against it.
+4. **Ordering:** `bc` runs before the reassignment (the static map is correct for
+   it); the reassignment is the session's last round, so its aftermath affects no
+   later window.
+
+**Predictions.**
+
+| Item | Prediction |
+|---|---|
+| fpcheck | 0 / 0 / 0 |
+| bc (the artifact-f test) | steady state: static 1 (new workload's unmapped-address edge), live 1 (`tj-health>tj-listener:80`), **system 2** (P-edge + P-procflow). The five r3 startup P-exec alerts must not fire (their keys learned from the agent's boot); if any still fires, recorded as measured |
+| churn pair (the artifact-d test; original r3 prediction, now cleanly testable) | B contains no pre-reassignment traffic. static: fires on B (misattributed twin edge + misattributed agent background) and raises no alert for the attack connection itself (FN); live: 0 on B, alerts `tj-victim>IMDS` on A (separates); system: 0 on B, alerts P-edge + P-procflow on A (separates) |
+| S0 | K1″ PASS with **0 orphans**; K2 PASS (no layout change inside any window except the churn pair, post-amendment); K3 unchanged |
+| re-scores vs the new store | verdicts unchanged from the r3 re-scores: S1/S1v/pivot — all arms fire; S2 — ip arms silent, system fires P-procflow + P-exec `base64`; S3 — all silent; r3-`1s` window — system fires P-edge `tj-svictim>IMDS` (+ P-procflow) and the 17 startup P-exec firings of r3 disappear (entrypoint keys now learned); r3-`1p` — all silent |
+| auditd / Falco / net cells | not re-measured (no new windows except the re-run rounds) |
+
+### Results — session r4: churn re-run and boot-inclusive learning (recorded 2026-10-20, after the run; evidence `evidence/r4/`)
+
+Session 16:48–16:58 UTC, fresh rollback, probe started **before container
+creation** (2 260 lines, 0 non-JSON). Boot-inclusive learning window
+16:48:20–16:52:07 (t0 precedes setup); frozen store v2: ipstatic/iplive 2 edges;
+join 32 keys — the nginx entrypoint chain (entrypoint scripts, PATH-search `sh`
+attempts, awk/basename/md5sum/…) and the agent's `sh -c` boot form are all
+learned benign.
+
+| Prediction | Outcome |
+|---|---|
+| **S0 / K1″** | **PASS — S0 is GO.** (a) 0, (b) 0, 0 duplicates, **0 orphans** (the session check prints the K1′ label; with 0 orphans it satisfies K1″ a fortiori). With the probe preceding all container creation, no pre-probe SYNs exist. K2 PASS 4/4 capture-window rounds (the learning window has no Zeek log by design — capture starts after it). Session-level: 103 Zeek SYN records ↔ 168 probe connects (the surplus are learning-window connects, before capture start, correctly excluded by the (b) bound); every SYN-bearing record matched. Cumulative S0 record across four sessions: **0 missed, 0 spurious, 0 duplicate connects** wherever both sensors ran |
+| fpcheck | ✓ 0 / 0 / 0 |
+| **bc (artifact-f test)** | ✓ **static 1** (`172.17.0.5>tj-listener:80`, the unmapped new address), **live 1** (`tj-health>tj-listener:80`), **system 2** (P-edge + P-procflow). The five r3 startup P-exec alerts did not fire — the artifact is fixed by measurement, not annotation: steady-state cost per deployment of a known image is 2 |
+| **churn pair (artifact-d test)** | ✓ original prediction, cleanly: auditd does not separate (argv-matched); Falco 0; **net does not separate** (the poller tuple is background in both windows — r3's Suricata write-lag artifact did not recur, so artifact c also disappears); **static fires on both windows** (misattributed twin edge `tj-imds-poller>tj-listener:80` + misattributed background `tj-victim>IMDS`) **and raises no alert for the attack connection** (FN); **live separates** (`tj-victim>IMDS`, 0 false keys); **system separates** (P-edge + P-procflow). The only A-only datapoint in all three arms is the attack's own |
+| re-scores vs store v2 | ✓ all confirmed: S1/S1v/pivot — all arms fire; S2 — ip arms silent, system fires P-procflow + P-exec `base64`; S3 — all silent; r3-`1s` pair — system fires exactly the two designed cells (`svictim>IMDS` P-edge + P-procflow; the 17 startup firings of r3 disappear), iplive silent, verdict unchanged; r3-`1p` pair — all six arms silent (blind-both) |
+
+**Prediction deviation, recorded:** the churn-benign window was predicted "0
+alerts" for live/system; measured, both fire the `tj-health` keys. Cause: the
+benign-change workload **keeps running after its round**, and under the frozen
+store its first-ever edge re-fires in **every subsequent window that contains
+it** (churn-benign and churn both contain `tj-health>tj-listener:80`). The
+churn-attribution cells are unaffected (the `tj-health` keys fire on both
+windows; the attack's datapoint is the only novel one). This is a measured
+refinement of the deployment cost, not a defect: *first-ever facts re-alert on
+every observation until the baseline is refreshed or the fact ages out* — the
+D12 decision now has both numbers: 2 alerts per deployment, recurring each
+window until re-learn.
+
+**Net effect on the thesis table:** footnotes c, d, e and f are resolved by
+measurement (deleted); a (the sidecar deployment's argv separation of auditd)
+and b (the static map's fires-on-both behavior) remain as annotated.
+
 Superseded expectation, kept for the record: the original guess that scenario 1 would be `covered-host-only` via a default Falco IMDS rule was **falsified** on 2026-09-25 — the deployed stable ruleset contains no IMDS rule, and the link-local flow *does* traverse `docker0`. Execution plan and decision log: [`CHECKPOINT.md`](../CHECKPOINT.md).
 
 ---
